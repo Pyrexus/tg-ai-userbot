@@ -1428,3 +1428,210 @@ function renderLoginHtml(err = ''): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login - TG AI Userbot</title>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at top, #1e1b4b, #09090b 70%);
+      color: #f3f4f6;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .box {
+      background: rgba(24, 24, 27, 0.8);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 20px;
+      padding: 36px 30px;
+      max-width: 400px;
+      width: 100%;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+      text-align: center;
+    }
+    h2 { font-size: 22px; margin-bottom: 8px; font-weight: 700; }
+    p { font-size: 13px; color: #9ca3af; margin-bottom: 24px; }
+    input {
+      width: 100%;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #fff;
+      font-size: 18px;
+      text-align: center;
+      letter-spacing: 4px;
+      outline: none;
+      margin-bottom: 16px;
+    }
+    input:focus { border-color: #3b82f6; box-shadow: 0 0 12px rgba(59,130,246,0.5); }
+    button {
+      width: 100%;
+      padding: 14px;
+      border-radius: 12px;
+      background: #2563eb;
+      color: #fff;
+      font-weight: 700;
+      font-size: 15px;
+      border: none;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.9; }
+    .err { color: #f87171; font-size: 13px; margin-bottom: 14px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>🔐 Admin Access</h2>
+    <p>Enter the 4-digit security passcode</p>
+    ${err ? `<div class="err">${esc(err)}</div>` : ''}
+    <form method="GET" action="/admin">
+      <input type="password" name="code" placeholder="••••" maxlength="10" required autofocus autocomplete="off">
+      <button type="submit">Unlock Admin Panel</button>
+    </form>
+  </div>
+</body>
+</html>`
+}
+
+/* ───────────── Worker entry ───────────── */
+export default {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(req.url)
+    const adminPass = env.ADMIN_CODE || '4847'
+
+    // Web Admin Panel route
+    if (url.pathname === '/admin') {
+      const code = url.searchParams.get('code') || ''
+      if (!code) {
+        return new Response(renderLoginHtml(), { headers: { 'content-type': 'text/html;charset=UTF-8' } })
+      }
+      if (code !== adminPass) {
+        return new Response(renderLoginHtml('Incorrect passcode!'), { status: 401, headers: { 'content-type': 'text/html;charset=UTF-8' } })
+      }
+      const t0 = performance.now()
+      const stats = await getAdminStats(env)
+      const ping = Math.round(performance.now() - t0)
+      return new Response(renderWebAdminHtml(stats, ping, code), {
+        headers: { 'content-type': 'text/html;charset=UTF-8' },
+      })
+    }
+
+    // Web Admin CSV Backup download route
+    if (url.pathname === '/admin/backup') {
+      const code = url.searchParams.get('code') || ''
+      if (code !== adminPass) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const type = (url.searchParams.get('type') || 'users') as 'users' | 'messages'
+      const data = await generateCsvData(env, type)
+      const dateStr = new Date().toISOString().slice(0, 10)
+      const content = type === 'messages' ? data.messages : data.users
+      const filename = type === 'messages' ? `message_logs_backup_${dateStr}.csv` : `users_backup_${dateStr}.csv`
+
+      return new Response(content, {
+        headers: {
+          'content-type': 'text/csv;charset=UTF-8',
+          'content-disposition': `attachment; filename="${filename}"`,
+        },
+      })
+    }
+
+    // Restart DO instance to force-load latest code
+    if (url.pathname === '/restart') {
+      const uid = url.searchParams.get('uid') || '6798950954'
+      const stub = env.USERBOT.get(env.USERBOT.idFromName(uid))
+      try {
+        await stub.fetch(`https://do/restart?uid=${uid}`)
+      } catch (e) {
+        // Crashed / restarted instance as intended
+      }
+      await new Promise(r => setTimeout(r, 1000))
+      const wakeRes = await stub.fetch(`https://do/wake?uid=${uid}`).catch(() => null)
+      return new Response(wakeRes ? await wakeRes.text() : 'restarting', { headers: { 'content-type': 'application/json' } })
+    }
+
+    // Wake / ping userbots on demand via HTTP
+    if (url.pathname === '/wake' || url.pathname === '/ping') {
+      const uid = url.searchParams.get('uid')
+      if (uid) {
+        const stub = env.USERBOT.get(env.USERBOT.idFromName(uid))
+        const res = await stub.fetch(`https://do/ping?uid=${uid}`)
+        return new Response(await res.text(), { headers: { 'content-type': 'application/json' } })
+      }
+      const rows = await turso(env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != ''")
+      const results: any[] = []
+      for (const [id] of rows) {
+        const stub = env.USERBOT.get(env.USERBOT.idFromName(id))
+        const res = await stub.fetch(`https://do/ping?uid=${id}`)
+        results.push({ uid: id, res: await res.json().catch(async () => await res.text()) })
+      }
+      return new Response(JSON.stringify({ total: rows.length, results }, null, 2), {
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/setup') {
+      if (url.searchParams.get('key') !== env.SETUP_KEY) return new Response('forbidden', { status: 403 })
+      await turso(env, 'CREATE TABLE IF NOT EXISTS users (tg_id TEXT PRIMARY KEY, session TEXT NOT NULL, created_at TEXT)')
+      await turso(env, 'CREATE TABLE IF NOT EXISTS message_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id TEXT NOT NULL, chat_id TEXT, command TEXT, created_at TEXT NOT NULL)')
+      try { await turso(env, 'CREATE INDEX IF NOT EXISTS idx_msg_logs_created ON message_logs(created_at)') } catch {}
+      try { await turso(env, 'CREATE INDEX IF NOT EXISTS idx_msg_logs_tg_id ON message_logs(tg_id)') } catch {}
+
+      const r = await bot(env, 'setWebhook', {
+        url: `${url.origin}/webhook`,
+        secret_token: env.WEBHOOK_SECRET,
+        allowed_updates: ['message', 'callback_query'],
+      })
+      return new Response('setup done: ' + JSON.stringify(r))
+    }
+
+    if (url.pathname === '/webhook' && req.method === 'POST') {
+      if (req.headers.get('x-telegram-bot-api-secret-token') !== env.WEBHOOK_SECRET) return new Response('no', { status: 403 })
+      const u: any = await req.json()
+      const m = u.message
+      if (m?.chat?.type === 'private' && m.from) {
+        const stub = env.USERBOT.get(env.USERBOT.idFromName(String(m.from.id)))
+        ctx.waitUntil(stub.fetch('https://do/msg', {
+          method: 'POST',
+          body: JSON.stringify({ chatId: m.chat.id, text: m.text, messageId: m.message_id, contact: m.contact }),
+        }))
+      } else if (u.callback_query) {
+        const cq = u.callback_query
+        const fromId = cq.from?.id
+        if (fromId) {
+          const stub = env.USERBOT.get(env.USERBOT.idFromName(String(fromId)))
+          ctx.waitUntil(stub.fetch('https://do/callback', {
+            method: 'POST',
+            body: JSON.stringify({
+              id: cq.id,
+              chatId: cq.message?.chat?.id,
+              messageId: cq.message?.message_id,
+              data: cq.data,
+              fromId,
+            }),
+          }))
+        }
+      }
+      return new Response('ok')
+    }
+
+    return new Response('TG AI userbot ✅')
+  },
+
+  // cron: keep every logged-in userbot awake / reconnected
+  async scheduled(_e: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const rows = await turso(env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != ''")
+    for (const [id] of rows) {
+      const stub = env.USERBOT.get(env.USERBOT.idFromName(id))
+      ctx.waitUntil(stub.fetch(`https://do/wake?uid=${id}`))
+    }
+  },
+}
