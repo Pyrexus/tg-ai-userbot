@@ -333,3 +333,248 @@ interface AdminStats {
   totalUsers: number
   activeUsers: number
   dailyMsgs: number
+  weeklyMsgs: number
+  monthlyMsgs: number
+  allTimeMsgs: number
+  topUsers: Array<{ tgId: string; count: number }>
+  dbHealth: { status: boolean; latencyMs: number; error?: string }
+  groqHealth: { status: boolean; latencyMs: number; error?: string }
+  tavilyHealth: { status: boolean; latencyMs: number; error?: string }
+  tgHealth: { status: boolean; latencyMs: number; error?: string }
+}
+
+async function getAdminStats(env: Env): Promise<AdminStats> {
+  const dbStart = performance.now()
+  let dbHealth: { status: boolean; latencyMs: number; error?: string } = { status: false, latencyMs: 0 }
+  let totalUsers = 0
+  let activeUsers = 0
+  let dailyMsgs = 0
+  let weeklyMsgs = 0
+  let monthlyMsgs = 0
+  let allTimeMsgs = 0
+  let topUsers: Array<{ tgId: string; count: number }> = []
+
+  const dbPromise = (async () => {
+    try {
+      const uRes = await turso(env, 'SELECT COUNT(*) FROM users')
+      totalUsers = Number(uRes[0]?.[0] || 0)
+
+      const actRes = await turso(env, "SELECT COUNT(*) FROM users WHERE session IS NOT NULL AND session != ''")
+      activeUsers = Number(actRes[0]?.[0] || 0)
+
+      const dRes = await turso(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-1 day')")
+      dailyMsgs = Number(dRes[0]?.[0] || 0)
+
+      const wRes = await turso(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-7 days')")
+      weeklyMsgs = Number(wRes[0]?.[0] || 0)
+
+      const mRes = await turso(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-30 days')")
+      monthlyMsgs = Number(mRes[0]?.[0] || 0)
+
+      const aRes = await turso(env, 'SELECT COUNT(*) FROM message_logs')
+      allTimeMsgs = Number(aRes[0]?.[0] || 0)
+
+      const topRes = await turso(env, 'SELECT tg_id, COUNT(*) as cnt FROM message_logs GROUP BY tg_id ORDER BY cnt DESC LIMIT 10')
+      topUsers = topRes.map(r => ({ tgId: r[0], count: Number(r[1] || 0) }))
+
+      dbHealth = { status: true, latencyMs: Math.round(performance.now() - dbStart) }
+    } catch (e: any) {
+      dbHealth = { status: false, latencyMs: Math.round(performance.now() - dbStart), error: String(e?.message || e) }
+    }
+  })()
+
+  const groqStart = performance.now()
+  let groqHealth: { status: boolean; latencyMs: number; error?: string } = { status: false, latencyMs: 0 }
+  const groqPromise = (async () => {
+    try {
+      const r = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
+      })
+      groqHealth = { status: r.ok, latencyMs: Math.round(performance.now() - groqStart), error: r.ok ? undefined : `HTTP ${r.status}` }
+    } catch (e: any) {
+      groqHealth = { status: false, latencyMs: Math.round(performance.now() - groqStart), error: String(e?.message || e) }
+    }
+  })()
+
+  const tavilyStart = performance.now()
+  let tavilyHealth: { status: boolean; latencyMs: number; error?: string } = { status: false, latencyMs: 0 }
+  const tavilyPromise = (async () => {
+    try {
+      const r = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ api_key: env.TAVILY_API_KEY, query: 'ping', max_results: 1 }),
+      })
+      tavilyHealth = { status: r.ok, latencyMs: Math.round(performance.now() - tavilyStart), error: r.ok ? undefined : `HTTP ${r.status}` }
+    } catch (e: any) {
+      tavilyHealth = { status: false, latencyMs: Math.round(performance.now() - tavilyStart), error: String(e?.message || e) }
+    }
+  })()
+
+  const tgStart = performance.now()
+  let tgHealth: { status: boolean; latencyMs: number; error?: string } = { status: false, latencyMs: 0 }
+  const tgPromise = (async () => {
+    try {
+      const r = await bot(env, 'getMe', {})
+      tgHealth = { status: Boolean(r?.ok), latencyMs: Math.round(performance.now() - tgStart), error: r?.ok ? undefined : r?.description || 'Error' }
+    } catch (e: any) {
+      tgHealth = { status: false, latencyMs: Math.round(performance.now() - tgStart), error: String(e?.message || e) }
+    }
+  })()
+
+  await Promise.all([dbPromise, groqPromise, tavilyPromise, tgPromise])
+
+  return {
+    totalUsers,
+    activeUsers,
+    dailyMsgs,
+    weeklyMsgs,
+    monthlyMsgs,
+    allTimeMsgs,
+    topUsers,
+    dbHealth,
+    groqHealth,
+    tavilyHealth,
+    tgHealth,
+  }
+}
+
+async function generateCsvData(env: Env, type: 'users' | 'messages' | 'all'): Promise<Record<string, string>> {
+  const result: Record<string, string> = {}
+
+  if (type === 'users' || type === 'all') {
+    const usersRows = await turso(env, "SELECT tg_id, created_at, (CASE WHEN session IS NOT NULL AND session != '' THEN 'yes' ELSE 'no' END) as active FROM users")
+    let csv = 'tg_id,created_at,has_active_session\n'
+    for (const r of usersRows) {
+      csv += r.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(',') + '\n'
+    }
+    result.users = csv
+  }
+
+  if (type === 'messages' || type === 'all') {
+    const logsRows = await turso(env, 'SELECT id, tg_id, chat_id, command, created_at FROM message_logs ORDER BY id DESC LIMIT 5000')
+    let csv = 'id,tg_id,chat_id,command,created_at\n'
+    for (const r of logsRows) {
+      csv += r.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(',') + '\n'
+    }
+    result.messages = csv
+  }
+
+  return result
+}
+
+async function sendCsvBackupToTelegram(env: Env, chatId: number | string) {
+  const data = await generateCsvData(env, 'all')
+  const dateStr = new Date().toISOString().slice(0, 10)
+
+  // 1. Users table backup
+  const formUsers = new FormData()
+  formUsers.append('chat_id', String(chatId))
+  formUsers.append('caption', `📦 <b>Users Database Backup</b> (${dateStr})\nTotal records: ${Math.max(0, data.users.split('\n').length - 2)}`)
+  formUsers.append('parse_mode', 'HTML')
+  formUsers.append('document', new Blob([data.users], { type: 'text/csv' }), `users_backup_${dateStr}.csv`)
+
+  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: 'POST',
+    body: formUsers,
+  })
+
+  // 2. Message logs backup
+  const formLogs = new FormData()
+  formLogs.append('chat_id', String(chatId))
+  formLogs.append('caption', `📊 <b>Message Logs Backup</b> (${dateStr})\nTotal records: ${Math.max(0, data.messages.split('\n').length - 2)}`)
+  formLogs.append('parse_mode', 'HTML')
+  formLogs.append('document', new Blob([data.messages], { type: 'text/csv' }), `message_logs_backup_${dateStr}.csv`)
+
+  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: 'POST',
+    body: formLogs,
+  })
+}
+
+async function buildAdminPanelMessage(env: Env) {
+  const start = performance.now()
+  const stats = await getAdminStats(env)
+  const ping = Math.round(performance.now() - start)
+
+  let topUsersText = '<i>None yet</i>'
+  if (stats.topUsers.length) {
+    topUsersText = stats.topUsers.map((u, i) => {
+      const name = `ID: <code>${u.tgId}</code>`
+      return `${i + 1}. ${name} — <b>${u.count}</b> msgs`
+    }).join('\n')
+  }
+
+  const text = `📊 <b>ADMIN CONTROL PANEL</b>\n` +
+    `🤖 <b>Bot:</b> @IDAiUserRobot | ⚡ <b>Ping:</b> <code>${ping}ms</code>\n\n` +
+    `👥 <b>User Statistics:</b>\n` +
+    `• <b>Total Joined:</b> <code>${stats.totalUsers}</code>\n` +
+    `• <b>Active Sessions:</b> <code>${stats.activeUsers}</code>\n\n` +
+    `📈 <b>Messages Activity:</b>\n` +
+    `• <b>Today (24h):</b> <code>${stats.dailyMsgs}</code>\n` +
+    `• <b>This Week (7d):</b> <code>${stats.weeklyMsgs}</code>\n` +
+    `• <b>This Month (30d):</b> <code>${stats.monthlyMsgs}</code>\n` +
+    `• <b>All-Time Sent:</b> <code>${stats.allTimeMsgs}</code>\n\n` +
+    `⚡ <b>System & Service Health:</b>\n` +
+    `• <b>Turso DB:</b> ${stats.dbHealth.status ? `🟢 Healthy (<code>${stats.dbHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
+    `• <b>Groq AI:</b> ${stats.groqHealth.status ? `🟢 Healthy (<code>${stats.groqHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
+    `• <b>Tavily Search:</b> ${stats.tavilyHealth.status ? `🟢 Healthy (<code>${stats.tavilyHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
+    `• <b>Telegram Bot API:</b> ${stats.tgHealth.status ? `🟢 Healthy (<code>${stats.tgHealth.latencyMs}ms</code>)` : `🔴 Down`}\n\n` +
+    `🏆 <b>Most Active Top 10 Users:</b>\n${topUsersText}\n\n` +
+    `<i>Updated: ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC</i>`
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: '🔄 Refresh Stats', callback_data: 'admin_refresh' },
+        { text: '📥 CSV Backup', callback_data: 'admin_backup' },
+      ],
+      [
+        { text: '⚡ Health Check', callback_data: 'admin_health' },
+        { text: '🚪 Exit Admin', callback_data: 'admin_exit' },
+      ],
+    ],
+  }
+
+  return { text, keyboard }
+}
+
+/* ───────────── Message Effects & Keyboard Helpers ───────────── */
+const EFFECT_FIRE = '5104841245755180586'
+const EFFECT_HEART = '5159385139981059251'
+const EFFECT_PARTY = '5046509860389126442'
+
+function getMainKeyboard(isRunning: boolean) {
+  return {
+    keyboard: [
+      [
+        { text: isRunning ? '📊 Bot Status' : '🔑 Connect Account', style: isRunning ? 'primary' : 'success' },
+        { text: isRunning ? '🚪 Disconnect / Logout' : '📊 Bot Status', style: isRunning ? 'danger' : 'primary' },
+      ],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  }
+}
+
+function getPhoneKeyboard() {
+  return {
+    keyboard: [
+      [
+        { text: '📱 Share Phone Number', request_contact: true, style: 'success' },
+      ],
+      [
+        { text: '❌ Cancel', style: 'danger' },
+      ],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  }
+}
+
+function getCancelKeyboard() {
+  return {
+    keyboard: [
+      [
+        { text: '❌ Cancel', style: 'danger' },
+      ],
