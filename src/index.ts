@@ -1178,3 +1178,253 @@ export class Userbot extends DurableObject<Env> {
 }
 
 /* ───────────── Web Admin HTML Template ───────────── */
+function renderWebAdminHtml(stats: AdminStats, ping: number, code: string): string {
+  const topUsersRows = stats.topUsers.length
+    ? stats.topUsers.map((u, i) => `
+      <tr>
+        <td style="padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.06);font-weight:600;color:#60a5fa;">#${i + 1}</td>
+        <td style="padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.06);"><code>${esc(u.tgId)}</code></td>
+        <td style="padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.06);font-weight:700;color:#34d399;">${u.count}</td>
+      </tr>
+    `).join('')
+    : '<tr><td colspan="3" style="padding:20px;text-align:center;color:#9ca3af;">No messages recorded yet</td></tr>'
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TG AI Userbot - Admin Control Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at top left, #1e1b4b, #09090b 60%);
+      color: #f3f4f6;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      min-height: 100vh;
+      padding: 30px 20px;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    h1 { font-size: 26px; font-weight: 800; display: flex; align-items: center; gap: 10px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 600;
+      background: rgba(34,197,94,0.15);
+      color: #4ade80;
+      border: 1px solid rgba(34,197,94,0.3);
+    }
+    .badge-dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 10px #4ade80; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card {
+      background: rgba(24, 24, 27, 0.7);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+      transition: transform 0.2s;
+    }
+    .card:hover { transform: translateY(-2px); }
+    .card-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9ca3af; margin-bottom: 8px; }
+    .card-val { font-size: 32px; font-weight: 800; color: #ffffff; }
+    .card-sub { font-size: 12px; color: #6b7280; margin-top: 6px; }
+
+    .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 30px; }
+    .health-card {
+      background: rgba(24, 24, 27, 0.7);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 14px;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .health-name { font-weight: 600; font-size: 14px; }
+    .status-pill {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .status-ok { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); }
+    .status-err { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+
+    .section-title { font-size: 18px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .table-box {
+      background: rgba(24, 24, 27, 0.7);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      overflow: hidden;
+      margin-bottom: 30px;
+    }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+    th {
+      background: rgba(255,255,255,0.03);
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      color: #9ca3af;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+    }
+    code { font-family: 'JetBrains Mono', monospace; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+
+    .btn-group { display: flex; flex-wrap: wrap; gap: 12px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 10px 18px;
+      border-radius: 10px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(37,99,235,0.4);
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-secondary {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #e5e7eb;
+      box-shadow: none;
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.14); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>🤖 TG AI Userbot <span style="font-weight:400;font-size:16px;color:#9ca3af;">Admin Panel</span></h1>
+        <p style="font-size:13px;color:#6b7280;margin-top:4px;">Live overview of Telegram AI userbot instances, health & activity</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div class="badge"><span class="badge-dot"></span> Live • Ping: ${ping}ms</div>
+        <a href="/admin?code=${encodeURIComponent(code)}" class="btn btn-secondary">🔄 Refresh</a>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">👥 Total Users Joined</div>
+        <div class="card-val">${stats.totalUsers}</div>
+        <div class="card-sub">Registered in Turso database</div>
+      </div>
+      <div class="card">
+        <div class="card-title">🟢 Active Sessions</div>
+        <div class="card-val" style="color:#34d399;">${stats.activeUsers}</div>
+        <div class="card-sub">Connected MTProto sessions</div>
+      </div>
+      <div class="card">
+        <div class="card-title">📅 Today's Messages (24h)</div>
+        <div class="card-val" style="color:#60a5fa;">${stats.dailyMsgs}</div>
+        <div class="card-sub">Weekly: ${stats.weeklyMsgs} | Monthly: ${stats.monthlyMsgs}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">🚀 All-Time Messages</div>
+        <div class="card-val" style="color:#c084fc;">${stats.allTimeMsgs}</div>
+        <div class="card-sub">Total .ai / .ask queries</div>
+      </div>
+    </div>
+
+    <div class="section-title">⚡ System & API Health Checks</div>
+    <div class="health-grid">
+      <div class="health-card">
+        <div>
+          <div class="health-name">Turso Database</div>
+          <div style="font-size:12px;color:#6b7280;">libsql protocol</div>
+        </div>
+        <div class="status-pill ${stats.dbHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.dbHealth.status ? `● OK (${stats.dbHealth.latencyMs}ms)` : '✕ Error'}
+        </div>
+      </div>
+      <div class="health-card">
+        <div>
+          <div class="health-name">Groq AI API</div>
+          <div style="font-size:12px;color:#6b7280;">OpenAI/Qwen fallback</div>
+        </div>
+        <div class="status-pill ${stats.groqHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.groqHealth.status ? `● OK (${stats.groqHealth.latencyMs}ms)` : '✕ Error'}
+        </div>
+      </div>
+      <div class="health-card">
+        <div>
+          <div class="health-name">Tavily Web Search</div>
+          <div style="font-size:12px;color:#6b7280;">Live web retrieval</div>
+        </div>
+        <div class="status-pill ${stats.tavilyHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.tavilyHealth.status ? `● OK (${stats.tavilyHealth.latencyMs}ms)` : '✕ Error'}
+        </div>
+      </div>
+      <div class="health-card">
+        <div>
+          <div class="health-name">Telegram Bot API</div>
+          <div style="font-size:12px;color:#6b7280;">Login & Control Bot</div>
+        </div>
+        <div class="status-pill ${stats.tgHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.tgHealth.status ? `● OK (${stats.tgHealth.latencyMs}ms)` : '✕ Error'}
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">🏆 Top 10 Most Active Users</div>
+    <div class="table-box">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:80px;">Rank</th>
+            <th>Telegram ID</th>
+            <th style="width:140px;">Messages Sent</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${topUsersRows}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-title">💾 Database Backup (.CSV Export)</div>
+    <div class="card" style="margin-bottom:30px;">
+      <p style="font-size:14px;color:#9ca3af;margin-bottom:16px;">
+        Download complete database records exported directly from Turso SQLite database in CSV format.
+      </p>
+      <div class="btn-group">
+        <a href="/admin/backup?code=${encodeURIComponent(code)}&type=users" class="btn">📥 Download Users CSV</a>
+        <a href="/admin/backup?code=${encodeURIComponent(code)}&type=messages" class="btn btn-secondary">📊 Download Messages Log CSV</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`
+}
+
+function renderLoginHtml(err = ''): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
