@@ -1,0 +1,21 @@
+{
+  "name": "tg-ai-userbot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "secrets": "wrangler secret bulk secrets.json",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@mtcute/html-parser": "latest",
+    "@mtcute/wasm": "latest",
+    "@mtcute/web": "latest"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "typescript": "latest",
+    "wrangler": "latest"
+  }
+}
