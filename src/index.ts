@@ -578,3 +578,603 @@ function getCancelKeyboard() {
       [
         { text: '❌ Cancel', style: 'danger' },
       ],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  }
+}
+
+/* ───────────── Durable Object: login + userbot runtime ───────────── */
+export class Userbot extends DurableObject<Env> {
+  tg?: TelegramClient
+  step: 'idle' | 'phone' | 'code' | 'pass' | 'admin_code' = 'idle'
+  phone = ''; hash = ''; uid = ''
+  running = false
+  isAdmin = false
+  bootPromise?: Promise<void>
+
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url)
+    if (url.pathname === '/restart') {
+      try { await this.tg?.destroy() } catch {}
+      this.tg = undefined
+      this.running = false
+      throw new Error('restart_instance_requested')
+    }
+    if (url.pathname === '/wake' || url.pathname === '/ping') {
+      const targetUid = url.searchParams.get('uid') || this.uid || (await this.ctx.storage.get<string>('uid')) || ''
+      if (!this.running) {
+        await this.boot(targetUid).catch(e => console.error('boot error on wake:', e))
+      }
+      let me: any = null
+      if (this.tg) {
+        try {
+          const m = await this.tg.getMe()
+          me = { id: m.id, username: m.username, displayName: m.displayName }
+        } catch (e: any) {
+          me = { error: String(e?.message || e) }
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, running: this.running, uid: this.uid, me }), {
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    if (url.pathname === '/msg') {
+      const { chatId, text, messageId, contact } = await req.json() as any
+      this.uid = String(chatId)
+      await this.ctx.storage.put('uid', this.uid)
+      if (!this.running && this.step === 'idle') {
+        this.boot(this.uid).catch(e => console.error('auto-boot on msg error:', e))
+      }
+      await this.onBotMessage(chatId, messageId, String(text || '').trim(), contact).catch(async e => {
+        await bot(this.env, 'sendMessage', { chat_id: chatId, text: 'Error: ' + (e?.message || e) })
+      })
+      return new Response('ok')
+    }
+    if (url.pathname === '/callback') {
+      const cq = await req.json() as any
+      await this.onCallbackQuery(cq).catch(async e => {
+        console.error('callback error:', e)
+      })
+      return new Response('ok')
+    }
+    return new Response(JSON.stringify({ error: 'not_found', pathname: url.pathname }), { status: 404, headers: { 'content-type': 'application/json' } })
+  }
+
+  async alarm() {
+    try {
+      if (!this.running || !this.tg) {
+        await this.boot()
+      } else {
+        await this.tg.startUpdatesLoop().catch(() => {})
+      }
+    } catch (e) {
+      console.error('alarm boot error:', e)
+    } finally {
+      await this.ctx.storage.setAlarm(Date.now() + 30_000)
+    }
+  }
+
+  newClient() {
+    return new TelegramClient({
+      apiId: Number(this.env.API_ID),
+      apiHash: this.env.API_HASH,
+      storage: new MemoryStorage(),
+      crypto: new WorkerCryptoProvider(),
+      initConnectionOptions: {
+        deviceModel: '𝗔𝗶 𝗜𝗗 𝗕𝗼𝘁 𝗼𝗻 𝗤𝘂𝗮𝗻𝘁𝗮 𝗦𝗲𝗿𝘃𝗲𝗿',
+        appVersion: '𝟭.𝟬.𝟬',
+        systemVersion: '𝗤𝘂𝗮𝗻𝘁𝗮 𝗖𝗹𝗼𝘂𝗱 𝗦𝗲𝗿𝘃𝗲𝗿',
+      },
+    })
+  }
+
+  /** load session from Turso and start listening */
+  async boot(uid = '') {
+    if (this.step !== 'idle') return
+    if (this.bootPromise) return this.bootPromise
+    this.bootPromise = (async () => {
+      try {
+        if (this.step !== 'idle') return
+        this.uid = this.uid || uid || (await this.ctx.storage.get<string>('uid')) || ''
+        if (!this.uid) return
+        await this.ctx.storage.put('uid', this.uid)
+        if (this.running && this.tg && (this.tg as any)._client?._connected) {
+          await this.tg.startUpdatesLoop().catch(() => {})
+          await this.ctx.storage.setAlarm(Date.now() + 30_000)
+          return
+        }
+        const rows = await turso(this.env, 'SELECT session FROM users WHERE tg_id = ?', [this.uid])
+        if (!rows.length || !rows[0][0]) return
+        const session = await decrypt(this.env, rows[0][0])
+        if (this.step !== 'idle') return
+        try { await this.tg?.destroy() } catch {}
+        const tg = this.newClient()
+        ;(tg as any)._client?.onConnectionState?.add((state: string) => {
+          if (state === 'closed' || state === 'broken') this.running = false
+        })
+        this.attach(tg)
+        await tg.start({ session })
+        if (this.step !== 'idle') {
+          try { await tg.destroy() } catch {}
+          return
+        }
+        await tg.startUpdatesLoop()
+        this.tg = tg; this.running = true
+        await this.ctx.storage.setAlarm(Date.now() + 30_000)
+      } finally {
+        this.bootPromise = undefined
+      }
+    })()
+    return this.bootPromise
+  }
+
+  async onCallbackQuery(cq: any) {
+    const data = String(cq.data || '')
+    const chatId = cq.chatId
+    const messageId = cq.messageId
+
+    await bot(this.env, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {})
+
+    // Main Menu Buttons
+    if (data === 'btn_login') {
+      this.step = 'phone'
+      this.phone = ''
+      this.hash = ''
+      const loginPrompt = `<blockquote><b>📱 Step 1 of 2: Phone Verification</b></blockquote>\n\n` +
+        `Tap the <b>📱 Share Phone Number</b> button below or enter your phone number with country code (e.g. <code>+1234567890</code>).`
+      return bot(this.env, 'sendMessage', {
+        chat_id: chatId,
+        text: loginPrompt,
+        parse_mode: 'HTML',
+        reply_markup: getPhoneKeyboard(),
+      })
+    }
+
+    if (data === 'btn_status') {
+      if (!this.running) {
+        await this.boot(String(chatId)).catch(() => {})
+      }
+      if (this.running) {
+        const statusText = `<blockquote><b>🟢 AI Userbot is Active & Running</b></blockquote>\n\n` +
+          `• <b>Status:</b> Listening for <code>.ai</code> and <code>.ask</code>\n` +
+          `• <b>Database:</b> Cloud SQLite synced\n` +
+          `• <b>Security:</b> Active AES-GCM session\n\n` +
+          `<i>Tip: In any personal chat or group, send <code>.ai your question</code> to use your userbot!</i>`
+        return bot(this.env, 'sendMessage', {
+          chat_id: chatId,
+          text: statusText,
+          parse_mode: 'HTML',
+          reply_markup: getMainKeyboard(true),
+          message_effect_id: EFFECT_FIRE,
+        })
+      } else {
+        const statusText = `<blockquote><b>⚪ AI Userbot is Not Connected</b></blockquote>\n\n` +
+          `No active session found. Tap <b>🔑 Connect Account</b> below to connect your Telegram account.`
+        return bot(this.env, 'sendMessage', {
+          chat_id: chatId,
+          text: statusText,
+          parse_mode: 'HTML',
+          reply_markup: getMainKeyboard(false),
+        })
+      }
+    }
+
+    if (data === 'btn_logout') {
+      try { await this.tg?.logOut() } catch {}
+      try { await this.tg?.destroy() } catch {}
+      this.tg = undefined; this.running = false; this.step = 'idle'
+      this.phone = ''; this.hash = ''
+      await turso(this.env, 'DELETE FROM users WHERE tg_id = ?', [this.uid])
+      await this.ctx.storage.deleteAlarm()
+      const logoutText = `<blockquote><b>🗑️ Session Disconnected & Removed</b></blockquote>\n\n` +
+        `Your userbot session has been logged out and all data cleared from the database.\n\n` +
+        `<i>Tap below anytime to reconnect your account.</i>`
+      return bot(this.env, 'sendMessage', {
+        chat_id: chatId,
+        text: logoutText,
+        parse_mode: 'HTML',
+        reply_markup: getMainKeyboard(false),
+        message_effect_id: EFFECT_HEART,
+      })
+    }
+
+    // Admin Panel Callbacks
+    const isAuthed = this.isAdmin || (await this.ctx.storage.get<boolean>('isAdmin'))
+    if (!isAuthed && data.startsWith('admin_')) {
+      await bot(this.env, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ <b>Session expired.</b> Please type /admin to authenticate again.',
+        parse_mode: 'HTML',
+      })
+      return
+    }
+
+    if (data === 'admin_refresh' || data === 'admin_health') {
+      const panel = await buildAdminPanelMessage(this.env)
+      await bot(this.env, 'editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: panel.text,
+        parse_mode: 'HTML',
+        reply_markup: panel.keyboard,
+      }).catch(() => {})
+    } else if (data === 'admin_backup') {
+      await bot(this.env, 'sendMessage', {
+        chat_id: chatId,
+        text: '⏳ <b>Preparing CSV database backup...</b>',
+        parse_mode: 'HTML',
+      })
+      await sendCsvBackupToTelegram(this.env, chatId).catch(async e => {
+        await bot(this.env, 'sendMessage', { chat_id: chatId, text: 'Backup error: ' + (e?.message || e) })
+      })
+    } else if (data === 'admin_exit') {
+      this.isAdmin = false
+      await this.ctx.storage.delete('isAdmin')
+      await bot(this.env, 'editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: '🚪 <b>Admin panel closed.</b> Use /admin to re-open anytime.',
+        parse_mode: 'HTML',
+      }).catch(() => {})
+    }
+  }
+
+  async onBotMessage(chatId: number, messageId: number, text: string, contact?: any) {
+    const say = (t: string, reply_markup?: any, effectId?: string) => {
+      const body: any = {
+        chat_id: chatId,
+        text: t,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }
+      if (reply_markup) body.reply_markup = reply_markup
+      if (effectId) body.message_effect_id = effectId
+      return bot(this.env, 'sendMessage', body)
+    }
+    const adminPass = this.env.ADMIN_CODE || '4847'
+    const parts = text.split(/\s+/)
+    const cmd = parts[0].toLowerCase()
+
+    /* ─── Cancel action ─── */
+    if (text === '❌ Cancel' || text.toLowerCase() === 'cancel' || cmd === '/cancel') {
+      this.step = 'idle'
+      this.phone = ''
+      this.hash = ''
+      const cancelText = `<blockquote><b>Operation Cancelled</b></blockquote>\n\nChoose an action below whenever you are ready.`
+      return say(cancelText, getMainKeyboard(this.running))
+    }
+
+    /* ─── Admin Command Handler (Hidden, not registered) ─── */
+    if (cmd === '/admin') {
+      const codeArg = parts[1]
+      if (codeArg === adminPass) {
+        this.isAdmin = true
+        this.step = 'idle'
+        await this.ctx.storage.put('isAdmin', true)
+        const panel = await buildAdminPanelMessage(this.env)
+        return say(panel.text, panel.keyboard, EFFECT_FIRE)
+      }
+
+      const isAuthed = this.isAdmin || (await this.ctx.storage.get<boolean>('isAdmin'))
+      if (isAuthed) {
+        const panel = await buildAdminPanelMessage(this.env)
+        return say(panel.text, panel.keyboard, EFFECT_FIRE)
+      }
+
+      this.step = 'admin_code'
+      return say('🔐 <b>Admin Control Panel</b>\n\nPlease enter the admin passcode:', getCancelKeyboard())
+    }
+
+    if (this.step === 'admin_code') {
+      if (text.trim() === adminPass) {
+        this.isAdmin = true
+        this.step = 'idle'
+        await this.ctx.storage.put('isAdmin', true)
+        await bot(this.env, 'deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => {})
+        const panel = await buildAdminPanelMessage(this.env)
+        return say(panel.text, panel.keyboard, EFFECT_FIRE)
+      }
+      this.step = 'idle'
+      return say('❌ <b>Access Denied:</b> Incorrect passcode.', getMainKeyboard(this.running))
+    }
+
+    if (cmd === '/admin_exit' || cmd === '/exit_admin') {
+      this.isAdmin = false
+      await this.ctx.storage.delete('isAdmin')
+      return say('🚪 Admin panel session closed.', getMainKeyboard(this.running))
+    }
+
+    if (cmd === '/backup' || (cmd === '/admin' && parts[1] === 'backup')) {
+      const isAuthed = this.isAdmin || (await this.ctx.storage.get<boolean>('isAdmin'))
+      if (!isAuthed) return say('❌ Unauthorized. Enter /admin first.', getMainKeyboard(this.running))
+      await say('⏳ <b>Generating CSV database backup...</b>')
+      return sendCsvBackupToTelegram(this.env, chatId)
+    }
+
+    /* ─── Regular User Commands & Buttons ─── */
+    if (cmd === '/start') {
+      const isRunning = this.running
+      const welcomeText = `<b>Welcome to AI Userbot</b> ⚡\n\n` +
+        `<blockquote>Transform your Telegram account into an intelligent AI-powered personal assistant.</blockquote>\n\n` +
+        `✨ <b>Key Capabilities:</b>\n` +
+        `• <b>Global AI Prompts:</b> Type <code>.ai &lt;query&gt;</code> or <code>.ask &lt;query&gt;</code> anywhere.\n` +
+        `• <b>Real-Time Web Search:</b> Instant factual answers via Tavily & Groq.\n` +
+        `• <b>Context-Aware Tone:</b> Natural conversation that matches chat mood.\n` +
+        `• <b>Cloud Security:</b> Sessions are encrypted with AES-256 GCM in your private Turso DB.\n\n` +
+        `👇 <b>Choose an action below to get started:</b>`
+      return say(welcomeText, getMainKeyboard(isRunning), EFFECT_FIRE)
+    }
+
+    if (cmd === '/status' || text === '📊 Bot Status' || text.toLowerCase() === 'status') {
+      if (!this.running) {
+        await this.boot(String(chatId)).catch(() => {})
+      }
+      if (this.running) {
+        const statusText = `<blockquote><b>🟢 AI Userbot is Active & Running</b></blockquote>\n\n` +
+          `• <b>Status:</b> Listening for <code>.ai</code> and <code>.ask</code>\n` +
+          `• <b>Database:</b> Cloud SQLite synced\n` +
+          `• <b>Security:</b> Active AES-GCM session\n\n` +
+          `<i>Tip: In any personal chat or group, send <code>.ai your question</code> to use your userbot!</i>`
+        return say(statusText, getMainKeyboard(true), EFFECT_FIRE)
+      } else {
+        const statusText = `<blockquote><b>⚪ AI Userbot is Not Connected</b></blockquote>\n\n` +
+          `No active session found. Tap <b>🔑 Connect Account</b> below to link your Telegram account.`
+        return say(statusText, getMainKeyboard(false))
+      }
+    }
+
+    if (cmd === '/logout' || text === '🚪 Disconnect / Logout' || text.toLowerCase() === 'logout') {
+      try { await this.tg?.logOut() } catch {}
+      try { await this.tg?.destroy() } catch {}
+      this.tg = undefined; this.running = false; this.step = 'idle'
+      this.phone = ''; this.hash = ''
+      await turso(this.env, 'DELETE FROM users WHERE tg_id = ?', [this.uid])
+      await this.ctx.storage.deleteAlarm()
+      const logoutText = `<blockquote><b>🗑️ Session Disconnected & Removed</b></blockquote>\n\n` +
+        `Your userbot session has been logged out and all data cleared from the database.\n\n` +
+        `<i>Tap below anytime to reconnect your account.</i>`
+      return say(logoutText, getMainKeyboard(false), EFFECT_HEART)
+    }
+
+    if (cmd === '/login' || text === '🔑 Connect Account' || text.toLowerCase() === 'login') {
+      this.step = 'phone'
+      this.phone = ''
+      this.hash = ''
+      const loginPrompt = `<blockquote><b>📱 Step 1 of 2: Phone Verification</b></blockquote>\n\n` +
+        `Tap the <b>📱 Share Phone Number</b> button below to share your Telegram number automatically, or type your number with country code (e.g. <code>+1234567890</code>).`
+      return say(loginPrompt, getPhoneKeyboard())
+    }
+
+    if (this.step === 'phone') {
+      let rawPhone = ''
+      if (contact?.phone_number) {
+        rawPhone = contact.phone_number
+      } else {
+        rawPhone = text.replace(/[^\d+]/g, '')
+      }
+      if (!rawPhone) {
+        return say('⚠️ Please tap <b>📱 Share Phone Number</b> or send a valid number with country code.', getPhoneKeyboard())
+      }
+      if (!rawPhone.startsWith('+')) rawPhone = '+' + rawPhone
+      this.phone = rawPhone
+      if (this.bootPromise) await this.bootPromise.catch(() => {})
+      try { await this.tg?.destroy() } catch {}
+      this.tg = undefined
+      this.running = false
+      const client = this.newClient()
+      this.tg = client
+      try {
+        await client.connect()
+        const sent: any = await client.sendCode({ phone: this.phone })
+        this.hash = sent.phoneCodeHash
+        this.step = 'code'
+        const codePrompt = `<blockquote><b>📩 Step 2 of 2: Enter Verification Code</b></blockquote>\n\n` +
+          `Telegram has sent a login code to your Telegram app or SMS for <code>${esc(this.phone)}</code>.\n\n` +
+          `⚠️ <b>IMPORTANT:</b> Please send the code with <b>spaces between digits</b> (e.g., <code>1 2 3 4 5</code>) so Telegram does not cancel the code.`
+        return say(codePrompt, getCancelKeyboard())
+      } catch (err: any) {
+        this.step = 'idle'
+        console.error('sendCode error:', err)
+        return say(`❌ <b>Failed to request verification code:</b>\n<code>${esc(err?.message || err)}</code>\n\nPlease check your phone number and try again.`, getMainKeyboard(this.running))
+      }
+    }
+
+    if (this.step === 'code') {
+      const code = text.replace(/\D/g, '')
+      try {
+        await this.tg!.signIn({ phone: this.phone, phoneCodeHash: this.hash, phoneCode: code })
+      } catch (e: any) {
+        if (String(e?.text || e?.message).includes('SESSION_PASSWORD_NEEDED')) {
+          this.step = 'pass'
+          const passPrompt = `<blockquote><b>🔐 Two-Factor Authentication (2FA) Required</b></blockquote>\n\n` +
+            `Your account has a 2FA password enabled. Please send your password below.\n\n` +
+            `<i>🛡️ Your password message will be deleted immediately for privacy.</i>`
+          return say(passPrompt, getCancelKeyboard())
+        }
+        throw e
+      }
+      return this.finishLogin(chatId, say)
+    }
+
+    if (this.step === 'pass') {
+      await bot(this.env, 'deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => {})
+      await this.tg!.checkPassword(text)
+      return this.finishLogin(chatId, say)
+    }
+
+    return say('Please select an option from the menu below 🙂', getMainKeyboard(this.running))
+  }
+
+  async finishLogin(chatId: number, say: (t: string, rm?: any, eff?: string) => Promise<any>) {
+    const session = await this.tg!.exportSession()
+    await turso(this.env,
+      "INSERT OR REPLACE INTO users (tg_id, session, created_at) VALUES (?, ?, datetime('now'))",
+      [String(chatId), await encrypt(this.env, session)]
+    )
+
+    this.attach(this.tg!)
+    await this.tg!.startUpdatesLoop().catch(() => {})
+    this.running = true; this.step = 'idle'
+    await this.ctx.storage.setAlarm(Date.now() + 30_000)
+
+    const successMsg = `<blockquote><b>🎉 Account Connected Successfully!</b></blockquote>\n\n` +
+      `Your AI Userbot is now running 24/7.\n\n` +
+      `🚀 <b>How to Use:</b>\n` +
+      `Go to <b>any chat or group</b> and send:\n` +
+      `• <code>.ai your question</code>\n` +
+      `• <code>.ask your question</code>\n` +
+      `• Or reply to any message with <code>.ai</code>\n\n` +
+      `<i>Your session is safely stored in your encrypted cloud database.</i>`
+    await say(successMsg, getMainKeyboard(true), EFFECT_PARTY)
+  }
+
+  /** the actual userbot logic */
+  seenMsgs = new Set<string>()
+  attach(tg: TelegramClient) {
+    tg.onNewMessage.add(async (msg: any) => {
+      try {
+        const isMine = msg.isOutgoing ||
+          (msg.sender?.id && String(msg.sender.id) === String(this.uid)) ||
+          (String(msg.chat.id) === String(this.uid))
+        if (!isMine) return
+        const textTrim = (msg.text || '').trim()
+        if (!textTrim.startsWith('.')) return
+
+        const msgKey = `${msg.chat.id}:${msg.id}`
+        if (this.seenMsgs.has(msgKey)) return
+        this.seenMsgs.add(msgKey)
+        if (this.seenMsgs.size > 200) {
+          const first = this.seenMsgs.values().next().value
+          if (first) this.seenMsgs.delete(first)
+        }
+
+        const deps: CmdDeps = { env: this.env, uid: this.uid, turso, askAI, systemPrompt, esc, sanitize, stripTags }
+
+        if (/^\.ping$/i.test(textTrim)) {
+          await handlePing(tg, msg, deps)
+          return
+        }
+
+        const spamM = textTrim.match(/^\.(fs|s)\s*(?:\+\s*)?(\d+)(?:\s*(?:\+\s*)?([\s\S]*))?$/i)
+        if (spamM) {
+          await handleSpam(tg, msg, deps, spamM[1].toLowerCase() === 'fs', Number(spamM[2]), (spamM[3] || '').trim())
+          return
+        }
+
+        const cloneM = textTrim.match(/^\.c\s*(?:\+\s*)?(\d+)\s*(?:\+\s*)?([\s\S]+)$/i)
+        if (cloneM) {
+          await handleClone(tg, msg, deps, Number(cloneM[1]), cloneM[2])
+          return
+        }
+
+        if (/^\.id$/i.test(textTrim)) {
+          await handleId(tg, msg, deps)
+          return
+        }
+
+        if (/^\.qt$/i.test(textTrim)) {
+          await handleQuote(tg, msg, deps)
+          return
+        }
+
+        const modM = textTrim.match(/^\.(kick|ban|mute|warn|promote|p|demote)(?:\s*(?:\+\s*)?([\s\S]*))?$/i)
+        if (modM) {
+          await handleMod(tg, msg, deps, modM[1].toLowerCase(), (modM[2] || '').trim())
+          return
+        }
+
+        const cleanM = textTrim.match(/^\.(purge|w|wipe|b|burn)(?:\s+([\s\S]*))?$/i)
+        if (cleanM) {
+          await handleCleanup(tg, msg, deps, cleanM[1].toLowerCase())
+          return
+        }
+
+        const m = textTrim.match(/^\.(ai|ask)(?:\s+([\s\S]*))?$/i)
+        if (!m) return
+        await this.handle(tg, msg, (m[2] || '').trim(), m[1].toLowerCase())
+      } catch (e) { console.error('handler error:', e) }
+    })
+  }
+
+  async handle(tg: TelegramClient, msg: any, qIn: string, commandName = 'ai') {
+    const nl = (h: string) => h.replace(/\r\n/g, '\n').replace(/\n/g, '<br>')
+    const br = (h: string) => h.replace(/<br\s*\/?>/gi, '\n')
+    const peer = msg.chat.inputPeer || msg.chat.id
+    const edit = async (htmlStr: string) => {
+      try {
+        await tg.editMessage({ message: msg, text: html(nl(htmlStr)) })
+      } catch {
+        try {
+          await tg.editMessage({ chatId: peer, message: msg.id, text: html(nl(htmlStr)) })
+        } catch {
+          await tg.editMessage({ chatId: peer, message: msg.id, text: stripTags(br(htmlStr)) }).catch(() => {})
+        }
+      }
+    }
+
+    // reply thread context (max 4 levels)
+    const thread: string[] = []
+    let cur = msg
+    for (let i = 0; i < 4; i++) {
+      const replyId = cur?.replyToMessage?.id
+      if (!replyId) break
+      try {
+        const curPeer = cur.chat?.inputPeer || cur.chat?.id || peer
+        const [r] = await tg.getMessages(curPeer, [replyId])
+        if (!r) break
+        thread.unshift(`${r.isOutgoing ? 'ME' : (r.sender?.displayName || 'User')}: ${(r.text || '[media]').slice(0, 500)}`)
+        cur = r
+      } catch {
+        break
+      }
+    }
+    let q = qIn
+    if (!q) {
+      const last = thread[thread.length - 1]
+      if (!last) return edit('<blockquote>𝗤𝘂𝗲 ➜ <b>?</b></blockquote>\n╰┈➤ Please ask a question: <code>.ai &lt;question&gt;</code>')
+      q = 'Reply/respond to this message: ' + last
+    }
+    await edit(`<blockquote>𝗤𝘂𝗲 ➜ <b>${esc(q.slice(0, 300))}</b></blockquote>\n╰┈➤ <i>Thinking... 🤔</i>`)
+
+    // Log message for admin stats
+    try {
+      const meObj = await tg.getMe().catch(() => null)
+      await turso(this.env,
+        "INSERT INTO message_logs (tg_id, chat_id, command, created_at) VALUES (?, ?, ?, datetime('now'))",
+        [String(this.uid || meObj?.id || ''), String(msg.chat.id), commandName]
+      )
+    } catch (e) {
+      console.error('message log error:', e)
+    }
+
+    // recent chat for mood
+    let recent = ''
+    try {
+      const hist = await tg.getHistory(peer, { limit: 8 })
+      recent = [...hist].reverse().filter((x: any) => x.id !== msg.id)
+        .map((x: any) => `${x.isOutgoing ? 'ME' : (x.sender?.displayName || 'User')}: ${(x.text || '[media]').slice(0, 200)}`).join('\n')
+    } catch {}
+
+    const wantLong = /\b(brief|detail|detailed|in depth|big|long|explain fully|elaborate|lamba|vistar|poora|puri|para|paragraph|stanza|essay|story|poem)\b|\b\d+\s*(lines?|paras?|paragraphs?|points?|steps?)\b/i.test(q)
+    const me = await tg.getMe()
+    const chatName = msg.chat.displayName || (msg.chat as any)?.title || (msg.chat as any)?.firstName || 'friend'
+    const userMsg = `[replied thread]\n${thread.join('\n') || '(none)'}\n\n[recent chat]\n${recent || '(none)'}\n\n[question]\n${q}`
+
+    let body: string
+    try {
+      body = sanitize(await askAI(this.env, systemPrompt(me.firstName || 'me', chatName, wantLong), userMsg, wantLong))
+    } catch (e) {
+      console.error(e)
+      body = 'I ran into a temporary network issue. Please try again in a moment 😭'
+    }
+
+    let out = `<blockquote>𝗤𝘂𝗲 ➜ <b>${esc(q.slice(0, 300))}</b></blockquote>\n╰┈➤ ${body}`
+    if (stripTags(out).length > 4000) {
+      out = out.slice(0, 3900) + '…'
+    }
+    await edit(out)
+  }
+}
+
+/* ───────────── Web Admin HTML Template ───────────── */
