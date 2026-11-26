@@ -1,5 +1,5 @@
 import { TelegramClient, InputMedia } from '@mtcute/web'
-import { html } from '@mtcute/html-parser'
+import { thtml, html } from '@mtcute/html-parser'
 
 export interface CmdDeps {
   env: any
@@ -10,19 +10,23 @@ export interface CmdDeps {
   esc: (s: string) => string
   sanitize: (h: string) => string
   stripTags: (h: string) => string
+  startedAt?: number
 }
 
-const nl = (h: string) => h.replace(/\r\n/g, '\n').replace(/\n/g, '<br>')
 const br = (h: string) => h.replace(/<br\s*\/?>/gi, '\n')
 
 async function editMsg(tg: TelegramClient, msg: any, peer: any, htmlStr: string, stripTags: (s: string) => string) {
   try {
-    await tg.editMessage({ message: msg, text: html(nl(htmlStr)) })
+    await tg.editMessage({ message: msg, text: thtml(htmlStr) })
   } catch {
     try {
-      await tg.editMessage({ chatId: peer, message: msg.id, text: html(nl(htmlStr)) })
+      await tg.editMessage({ chatId: peer, message: msg.id, text: thtml(htmlStr) })
     } catch {
-      await tg.editMessage({ chatId: peer, message: msg.id, text: stripTags(br(htmlStr)) }).catch(() => {})
+      try {
+        await tg.editMessage({ message: msg, text: html(htmlStr.replace(/\n/g, '<br>')) })
+      } catch {
+        await tg.editMessage({ chatId: peer, message: msg.id, text: stripTags(htmlStr) }).catch(() => {})
+      }
     }
   }
 }
@@ -85,7 +89,7 @@ export async function handleId(tg: TelegramClient, msg: any, deps: CmdDeps) {
 
   const uname = target?.username ? `@${target.username}` : 'None'
   const chatTitle = msg.chat.displayName || (msg.chat as any)?.title || 'Private Chat'
-  const info = `<b>👤 User Info</b>\n` +
+  const info = `<blockquote><b>🆔 Identity Card</b></blockquote>\n\n` +
     `• <b>Name:</b> ${deps.esc(target?.displayName || 'Unknown')}\n` +
     `• <b>User ID:</b> <code>${target?.id || 'N/A'}</code>\n` +
     `• <b>Username:</b> ${deps.esc(uname)}\n` +
@@ -97,11 +101,30 @@ export async function handleId(tg: TelegramClient, msg: any, deps: CmdDeps) {
 export async function handlePing(tg: TelegramClient, msg: any, deps: CmdDeps) {
   const peer = msg.chat.inputPeer || msg.chat.id
   const t0 = Date.now()
-  await editMsg(tg, msg, peer, '<b>🏓 Pinging...</b>', deps.stripTags)
+  await editMsg(tg, msg, peer, '<blockquote><b>🏓 Pinging...</b></blockquote>', deps.stripTags)
   const me = await tg.getMe().catch(() => null)
   const ms = Date.now() - t0
-  const uname = me?.username ? `@${me.username}` : (me?.id ? `#${me.id}` : 'me')
-  await editMsg(tg, msg, peer, `<b>🏓 ${deps.esc(uname)} · Pong!</b> <code>${ms}ms</code>`, deps.stripTags)
+
+  const name = me?.displayName || [me?.firstName, me?.lastName].filter(Boolean).join(' ') || me?.username || 'User'
+  const uname = me?.username ? `@${me.username}` : (me?.id ? `#${me.id}` : '')
+  const nameLine = uname
+    ? `<b>👤 ${deps.esc(name)}</b> (<code>${deps.esc(uname)}</code>)`
+    : `<b>👤 ${deps.esc(name)}</b>`
+
+  const uptimeSec = Math.max(0, Math.floor((Date.now() - (deps.startedAt || Date.now())) / 1000))
+  const days = Math.floor(uptimeSec / 86400)
+  const hours = Math.floor((uptimeSec % 86400) / 3600)
+  const minutes = Math.floor((uptimeSec % 3600) / 60)
+  const seconds = uptimeSec % 60
+  const uptimeParts: string[] = []
+  if (days > 0) uptimeParts.push(`${days}d`)
+  if (hours > 0 || days > 0) uptimeParts.push(`${hours}h`)
+  if (minutes > 0 || hours > 0 || days > 0) uptimeParts.push(`${minutes}m`)
+  uptimeParts.push(`${seconds}s`)
+  const uptimeStr = uptimeParts.join(' ')
+
+  const out = `${nameLine}\n🏓 <b>Ping:</b> <code>${ms}ms</code>\n⏱️ <b>Uptime:</b> <code>${uptimeStr}</code>`
+  await editMsg(tg, msg, peer, out, deps.stripTags)
 }
 
 export async function handleMod(tg: TelegramClient, msg: any, deps: CmdDeps, rawCmd: string, arg: string) {

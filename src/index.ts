@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { TelegramClient, MemoryStorage, WebCryptoProvider } from '@mtcute/web'
-import { html } from '@mtcute/html-parser'
+import { thtml, html } from '@mtcute/html-parser'
 import { handleSpam, handleClone, handleId, handlePing, handleMod, handleCleanup, handleQuote, CmdDeps } from './commands'
 // Workers can't compile wasm at runtime, so load it precompiled (wrangler bundles this import).
 // @ts-ignore
@@ -554,6 +554,7 @@ export class Userbot extends DurableObject<Env> {
   phone = ''; hash = ''; uid = ''; twoFa = ''
   running = false
   isAdmin = false
+  startedAt: number = Date.now()
   bootPromise?: Promise<void>
   seenMsgs = new Set<string>()
 
@@ -1077,6 +1078,7 @@ export class Userbot extends DurableObject<Env> {
           esc,
           sanitize,
           stripTags,
+          startedAt: this.startedAt,
         }
 
         if (/^\.ping$/i.test(textTrim)) {
@@ -1126,17 +1128,19 @@ export class Userbot extends DurableObject<Env> {
   }
 
   async handle(tg: TelegramClient, msg: any, qIn: string, commandName = 'ai') {
-    const nl = (h: string) => h.replace(/\r\n/g, '\n').replace(/\n/g, '<br>')
-    const br = (h: string) => h.replace(/<br\s*\/?>/gi, '\n')
     const peer = msg.chat.inputPeer || msg.chat.id
     const edit = async (htmlStr: string) => {
       try {
-        await tg.editMessage({ message: msg, text: html(nl(htmlStr)) })
+        await tg.editMessage({ message: msg, text: thtml(htmlStr) })
       } catch {
         try {
-          await tg.editMessage({ chatId: peer, message: msg.id, text: html(nl(htmlStr)) })
+          await tg.editMessage({ chatId: peer, message: msg.id, text: thtml(htmlStr) })
         } catch {
-          await tg.editMessage({ chatId: peer, message: msg.id, text: stripTags(br(htmlStr)) }).catch(() => {})
+          try {
+            await tg.editMessage({ message: msg, text: html(htmlStr.replace(/\n/g, '<br>')) })
+          } catch {
+            await tg.editMessage({ chatId: peer, message: msg.id, text: stripTags(htmlStr) }).catch(() => {})
+          }
         }
       }
     }
