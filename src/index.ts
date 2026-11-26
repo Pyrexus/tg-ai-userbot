@@ -94,7 +94,16 @@ async function bot(env: Env, method: string, body: any) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   })
-  return r.json() as Promise<any>
+  const json: any = await r.json().catch(() => null)
+  if (!json?.ok && body?.message_effect_id) {
+    const fallbackBody = { ...body }
+    delete fallbackBody.message_effect_id
+    const r2 = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fallbackBody),
+    })
+    return r2.json().catch(() => json) as Promise<any>
+  }
+  return json as Promise<any>
 }
 
 /* ───────────── HTML helpers ───────────── */
@@ -487,43 +496,55 @@ function getMainKeyboard(isRunning: boolean) {
 }
 
 function getHelpGuideText(): string {
-  return `<blockquote><b>📖 AI Userbot — Master Command Guide</b></blockquote>\n\n` +
-    `🤖 <b>In-Chat AI Assistant</b>\n` +
-    `• <code>.ai &lt;question&gt;</code> or <code>.ask &lt;question&gt;</code>\n` +
-    `  ↳ <b>Purpose:</b> Generates smart, human-like answers formatted in beautiful Telegram HTML.\n` +
-    `  ↳ <b>How to Use:</b> Type in any DM or group. The message edits itself with the answer.\n` +
-    `• <b>Reply + <code>.ai</code></b>\n` +
-    `  ↳ <b>Purpose:</b> Analyzes the replied message or conversation thread.\n` +
-    `• <b>Real-Time Web Search</b>\n` +
-    `  ↳ <b>Purpose:</b> Automatically triggered via Tavily for live facts, cricket, news, & weather.\n\n` +
-    `🧹 <b>Chat Cleanup & Privacy</b>\n` +
-    `• <code>.purge</code> / <code>.p</code> <i>(reply to a message)</i>\n` +
-    `  ↳ <b>Purpose:</b> Mass-deletes all messages forward from the replied message for both sides.\n` +
-    `  ↳ <b>Note:</b> Works in DMs and groups (requires delete permission in groups).\n` +
-    `• <code>.burn</code> / <code>.b</code>\n` +
-    `  ↳ <b>Purpose:</b> Self-purge: deletes only your own messages with verified delete count.\n` +
-    `• <code>.wipe</code> / <code>.w</code>\n` +
-    `  ↳ <b>Purpose:</b> Cleans up all bot messages in the current chat.\n\n` +
-    `⚡ <b>Productivity & Fun Tools</b>\n` +
-    `• <code>.ping</code>\n` +
-    `  ↳ <b>Purpose:</b> Checks bot roundtrip latency with your username/ID.\n` +
-    `• <code>.id</code> <i>(or reply to user)</i>\n` +
-    `  ↳ <b>Purpose:</b> Displays detailed User ID, chat ID, and join date metadata.\n` +
-    `• <code>.qt</code> <i>(reply to message)</i>\n` +
-    `  ↳ <b>Purpose:</b> Generates a custom quote sticker from the replied message.\n` +
-    `• <code>.s &lt;count&gt; &lt;text&gt;</code>\n` +
-    `  ↳ <b>Purpose:</b> Spams messages with a 750ms delay (max 30, supports user tags).\n` +
-    `• <code>.fs &lt;count&gt; &lt;text&gt;</code>\n` +
-    `  ↳ <b>Purpose:</b> Fast burst spam: sends all messages at once without delay (max 30).\n` +
-    `• <code>.c &lt;count&gt; &lt;text&gt;</code>\n` +
-    `  ↳ <b>Purpose:</b> Clones/repeats text inline in bold (max 100).\n\n` +
-    `🛡️ <b>Admin Moderation (Group Admins Only)</b>\n` +
-    `• <code>.ban</code> <i>(reply)</i> — Bans user with a brutal AI roast.\n` +
-    `• <code>.kick</code> <i>(reply)</i> — Removes user from group without banning.\n` +
-    `• <code>.mute 10m/1h/1d</code> <i>(reply)</i> — Mutes user for the specified duration.\n` +
-    `• <code>.warn &lt;reason&gt;</code> <i>(reply)</i> — Warns user (auto-bans on 3/3 warnings).\n` +
-    `• <code>.promote</code> / <code>.demote</code> <i>(reply)</i> — Grants/revokes admin rights.\n\n` +
-    `<blockquote><i>💡 Tip: All commands run directly from your user account. No extra bot prefix or invite needed!</i></blockquote>`
+  return `<b>📖 AI Userbot — Master Command Guide</b>
+` +
+    `<i>All commands run directly from your user account. No extra bot prefix needed!</i>
+
+` +
+    `<blockquote>🤖 <b>In-Chat AI Assistant</b>
+` +
+    `• <code>.ai &lt;question&gt;</code> or <code>.ask &lt;question&gt;</code> — Generates smart answers in-place
+` +
+    `• <b>Reply + <code>.ai</code></b> — Analyzes the replied message or conversation thread
+` +
+    `• <b>Real-Time Web Search</b> — Instant live facts via Tavily search</blockquote>
+
+` +
+    `<blockquote>🧹 <b>Chat Cleanup &amp; Privacy</b>
+` +
+    `• <code>.purge</code> / <code>.p</code> <i>(reply)</i> — Mass-deletes all messages forward for both sides
+` +
+    `• <code>.burn</code> / <code>.b</code> — Deletes only your own messages with verified count
+` +
+    `• <code>.wipe</code> / <code>.w</code> — Cleans all bot messages in the current chat</blockquote>
+
+` +
+    `<blockquote>⚡ <b>Productivity &amp; Fun Tools</b>
+` +
+    `• <code>.ping</code> — Real-time latency, mention &amp; uptime
+` +
+    `• <code>.id</code> <i>(or reply)</i> — Displays User ID, chat ID, and join date metadata
+` +
+    `• <code>.qt</code> <i>(reply)</i> — Generates a custom quote sticker
+` +
+    `• <code>.s &lt;n&gt; &lt;text&gt;</code> — Spams messages with delay (max 30)
+` +
+    `• <code>.fs &lt;n&gt; &lt;text&gt;</code> — Fast burst spam without delay (max 30)
+` +
+    `• <code>.c &lt;n&gt; &lt;text&gt;</code> — Repeats text inline in bold (max 100)</blockquote>
+
+` +
+    `<blockquote>🛡️ <b>Admin Moderation (Group Admins Only)</b>
+` +
+    `• <code>.ban</code> <i>(reply)</i> — Bans user with an AI roast
+` +
+    `• <code>.kick</code> <i>(reply)</i> — Removes user without banning
+` +
+    `• <code>.mute 10m/1h/1d</code> <i>(reply)</i> — Mutes user for specified duration
+` +
+    `• <code>.warn &lt;reason&gt;</code> <i>(reply)</i> — Warns user (auto-bans on 3/3)
+` +
+    `• <code>.promote</code> / <code>.demote</code> <i>(reply)</i> — Modifies administrator rights</blockquote>`
 }
 
 function getPhoneKeyboard() {

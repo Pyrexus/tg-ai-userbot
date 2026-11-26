@@ -106,10 +106,9 @@ export async function handlePing(tg: TelegramClient, msg: any, deps: CmdDeps) {
   const ms = Date.now() - t0
 
   const name = me?.displayName || [me?.firstName, me?.lastName].filter(Boolean).join(' ') || me?.username || 'User'
-  const uname = me?.username ? `@${me.username}` : (me?.id ? `#${me.id}` : '')
-  const nameLine = uname
-    ? `<b>👤 ${deps.esc(name)}</b> (<code>${deps.esc(uname)}</code>)`
-    : `<b>👤 ${deps.esc(name)}</b>`
+  const myId = me?.id || deps.uid
+  const mention = `<a href="tg://user?id=${myId}">${deps.esc(name)}</a>`
+  const nameLine = `<b>${mention}</b>`
 
   const uptimeSec = Math.max(0, Math.floor((Date.now() - (deps.startedAt || Date.now())) / 1000))
   const days = Math.floor(uptimeSec / 86400)
