@@ -1,0 +1,10 @@
+BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+API_ID=12345678
+API_HASH=0123456789abcdef0123456789abcdef
+GROQ_API_KEY=gsk_...
+TAVILY_API_KEY=tvly-...
+SESSION_KEY=replace-with-a-random-32-char-secret-string
+WEBHOOK_SECRET=replace-with-a-random-webhook-secret
+SETUP_KEY=replace-with-a-secret-setup-key
+ADMIN_CODE=4847
+QUOTE_API_URL=https://tg-quote-api.100coldice.workers.dev

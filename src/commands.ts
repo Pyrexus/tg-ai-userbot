@@ -228,7 +228,7 @@ export async function handleCleanup(tg: TelegramClient, msg: any, deps: CmdDeps,
   }
 
   const myId = deps.uid || String((await tg.getMe().catch(() => null))?.id || '')
-  const isOwnerDmBlocked = mode === 'purge' && String(msg.chat.id) === OWNER_ID && myId !== OWNER_ID
+  const isOwnerDmBlocked = mode === 'purge' && Boolean(deps.uid && String(msg.chat.id) === String(deps.uid) && String(msg.sender?.id || '') !== String(deps.uid))
 
   if (mode === 'wipe' && !isDm) {
     const member = await tg.getChatMember({ chatId: peer, userId: 'me' }).catch(() => null)
@@ -295,15 +295,13 @@ export async function handleCleanup(tg: TelegramClient, msg: any, deps: CmdDeps,
   return editBold(`${deleted} self msg deleted`)
 }
 
-const OWNER_ID = '6810553459'
-
 export async function handleQuote(tg: TelegramClient, msg: any, deps: CmdDeps) {
   const peer = msg.chat.inputPeer || msg.chat.id
   const editHtml = (s: string) => editMsg(tg, msg, peer, s, deps.stripTags)
 
   const replyId = msg.replyToMessage?.id
   if (!replyId) {
-    return editHtml(`<b>Reply to a message with .qt to make a quote</b>`)
+    return editHtml('<b>Reply to a message with .qt to make a quote</b>')
   }
 
   await editHtml('<b>🍳 Quote is getting cooked...</b>')
@@ -313,7 +311,7 @@ export async function handleQuote(tg: TelegramClient, msg: any, deps: CmdDeps) {
     return editHtml('<b>Could not fetch the replied message</b>')
   }
 
-  const isOwnerProtected = String(replied.sender?.id || '') === OWNER_ID && String(deps.uid) !== OWNER_ID
+  const isOwnerProtected = Boolean(deps.uid && String(replied.sender?.id || '') === String(deps.uid) && String(msg.sender?.id || '') !== String(deps.uid))
   const quoteSender = isOwnerProtected ? msg.sender : replied.sender
   const protectText = 'Kiddo 🤡\nDont mess with owner 🙂↕️'
   const quoteText = isOwnerProtected ? protectText : (replied.text || '[media]')
@@ -382,6 +380,6 @@ export async function handleQuote(tg: TelegramClient, msg: any, deps: CmdDeps) {
     await tg.deleteMessagesById(peer, [msg.id], { revoke: true }).catch(() => {})
     return
   } catch (e: any) {
-    return editHtml(`<b>Quote API failed:</b> <code>${deps.esc(e?.message || e)}</code>\n<i>Set QUOTE_API_URL to your LyoSU/quote-api instance</i>`)
+    return editHtml(`<b>Quote API failed:</b> <code>${deps.esc(e?.message || e)}</code>\n<i>Set QUOTE_API_URL to your quote-api instance</i>`)
   }
 }

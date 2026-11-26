@@ -4,7 +4,7 @@ compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-GROQ_MODELS = "qwen/qwen3.8-27b,openai/gpt-oss-120b"   # tried in order, falls back on error
+GROQ_MODELS = "qwen/qwen3.8-27b,openai/gpt-oss-120b"
 QUOTE_API_URL = "https://tg-quote-api.100coldice.workers.dev"
 
 [[durable_objects.bindings]]
@@ -15,89 +15,10 @@ class_name = "Userbot"
 tag = "v1"
 new_sqlite_classes = ["Userbot"]
 
-[[migrations]]
-tag = "v2"
-renamed_classes = []
-
-[[migrations]]
-tag = "v3"
-renamed_classes = []
-
-[[migrations]]
-tag = "v4"
-renamed_classes = []
-
-[[migrations]]
-tag = "v5"
-renamed_classes = []
-
-[[migrations]]
-tag = "v6"
-renamed_classes = []
-
-[[migrations]]
-tag = "v7"
-renamed_classes = []
-
-[[migrations]]
-tag = "v8"
-renamed_classes = []
-
-[[migrations]]
-tag = "v9"
-renamed_classes = []
-
-[[migrations]]
-tag = "v10"
-renamed_classes = []
-
-[[migrations]]
-tag = "v11"
-renamed_classes = []
-
-[[migrations]]
-tag = "v12"
-renamed_classes = []
-
-[[migrations]]
-tag = "v13"
-renamed_classes = []
-
-[[migrations]]
-tag = "v14"
-renamed_classes = []
-
-[[migrations]]
-tag = "v15"
-renamed_classes = []
-
-[[migrations]]
-tag = "v16"
-renamed_classes = []
-
-[[migrations]]
-tag = "v17"
-renamed_classes = []
-
-[[migrations]]
-tag = "v18"
-renamed_classes = []
-
-[[migrations]]
-tag = "v19"
-renamed_classes = []
-
-[[migrations]]
-tag = "v20"
-renamed_classes = []
-
-[[migrations]]
-tag = "v21"
-renamed_classes = []
-
-[[migrations]]
-tag = "v22"
-renamed_classes = []
+[[d1_databases]]
+binding = "DB"
+database_name = "tg-ai-userbot-db"
+database_id = ""   # Auto-provisioned by Cloudflare Deploy button, or create via: npx wrangler d1 create tg-ai-userbot-db
 
 [triggers]
-crons = ["* * * * *"]           # wakes every logged-in userbot each minute
+crons = ["*/5 * * * *"]   # 5-minute watchdog ping to keep solo userbot alive without quota exhaustion

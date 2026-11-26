@@ -1,73 +1,94 @@
-# ⚡ TG AI Userbot
+# ⚡ TG AI Userbot (Solo / Self-Hosted Edition)
 
-Serverless 24/7 Telegram AI Userbot running on **Cloudflare Workers + Durable Objects**, powered by **mtcute**, **Groq (`qwen/qwen3.8-27b`)**, **Tavily Web Search**, and **Turso (libSQL)** with AES-256-GCM encrypted sessions.
+Serverless 24/7 Telegram AI Userbot running on **Cloudflare Workers + Cloudflare D1 (SQL) + Durable Objects**, powered by **mtcute**, **Groq (`qwen/qwen3.8-27b`)**, **Tavily Web Search**, and AES-256-GCM encrypted sessions.
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Pyrexus/tg-ai-userbot)
 
 ---
 
+## 🌟 Why Solo / Self-Hosted?
+
+- **100% Cloudflare Native**: Uses **Cloudflare D1 (Serverless SQLite)** for data storage. No external database services (like Turso) required!
+- **Zero Free-Tier Quota Issues**: Built as a dedicated single-user instance. Exactly **1 Durable Object** runs on your account, staying well within Cloudflare's free limits.
+- **Private Solo Lock**: The bot automatically locks to the first Telegram account that connects. Any other user messaging the bot is rejected with an access-denied screen.
+- **1-Click Deployment**: Deploy directly into your Cloudflare account using the Cloudflare Workers Deploy button.
+
+---
+
 ## ✨ Features
 
-- **In-Chat AI (`.ai` / `.ask`)** — Edits your message in place with context from reply threads & recent chat, formatted in clean Telegram HTML.
-- **Live Web Search** — Automatic Tavily search tool for real-time news, prices, weather, and current facts.
+- **In-Chat AI (`.ai` / `.ask`)** — Edits your message in place with context from reply threads & recent chat in Romanized Hindi/Hinglish or English.
+- **Real-Time Web Search** — Automatic Tavily search integration for live news, weather, prices, and facts.
+- **Quote Stickers (`.qt`)** — Generates high-quality quote stickers from replied messages via Cloudflare quote rendering worker.
 - **Chat Cleanup Commands**:
-  - `.p` / `.purge` — Reply to any message to delete all messages from that point forward (both sides).
-  - `.w` / `.wipe` — Deletes all bot messages in the chat (admin check in groups/channels).
-  - `.b` / `.burn` — Self-purge: deletes only your own messages.
-- **Zero-Server Persistence** — Each user runs in an isolated Cloudflare Durable Object with auto-wake alarms and cron keep-alive.
-- **Encrypted Cloud Storage** — Sessions are encrypted with AES-256-GCM before being stored in Turso.
-- **Admin Control Panel** — Hidden `/admin` bot command + live glassmorphism Web Dashboard (`/admin`) with stats, API/DB health checks, and CSV backups.
+  - `.purge` / `.p` — Purges messages forward from the replied message (both sides, works in groups & DMs).
+  - `.wipe` / `.w` — Deletes bot messages in the chat.
+  - `.burn` / `.b` — Deletes only your own messages with accurate deleted counts.
+- **Fun & Productivity**:
+  - `.s <count> <msg>` / `.fs <count> <msg>` — Spam / fast spam (supports user mentions & replies).
+  - `.c <count> <text>` — Inline clone repetitions in bold.
+  - `.id` — Displays detailed user and chat metadata.
+  - `.ping` — Instant userbot roundtrip latency with your username.
+- **Group Moderation**:
+  - `.ban`, `.kick`, `.mute`, `.warn`, `.promote`, `.demote` with permissions validation.
+- **Admin Control Panel**:
+  - Hidden `/admin` command in the login bot + web dashboard with analytics, API health checks, and CSV log backups.
 
 ---
 
-## 🚀 Quick Setup
+## 🚀 1-Click Deployment (Recommended)
 
-1. **Clone & install**
-   ```bash
-   git clone https://github.com/Pyrexus/tg-ai-userbot.git
-   cd tg-ai-userbot
-   npm install
-   ```
-
-2. **Configure secrets**
-   ```bash
-   cp secrets.example.json secrets.json
-   ```
-   Fill in your credentials in `secrets.json`:
-   - `BOT_TOKEN` — Telegram bot token from `@BotFather`
-   - `API_ID` & `API_HASH` — From [my.telegram.org](https://my.telegram.org)
-   - `TURSO_URL` & `TURSO_TOKEN` — From [turso.tech](https://turso.tech)
-   - `GROQ_API_KEY` — From [console.groq.com](https://console.groq.com)
-   - `TAVILY_API_KEY` — From [tavily.com](https://tavily.com)
-   - `SESSION_KEY`, `WEBHOOK_SECRET`, `SETUP_KEY`, `ADMIN_CODE`
-
-3. **Upload secrets & deploy**
-   ```bash
-   npm run secrets
-   npm run deploy
-   ```
-
-4. **Initialize DB & Webhook (once)**
+1. Click the **[Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/?url=https://github.com/Pyrexus/tg-ai-userbot)** button above.
+2. Sign in to your Cloudflare account.
+3. Fill in the prompted environment variables:
+   - `BOT_TOKEN` — Telegram Bot Token from [@BotFather](https://t.me/BotFather)
+   - `API_ID` & `API_HASH` — Obtained from [my.telegram.org](https://my.telegram.org)
+   - `GROQ_API_KEY` — Free API key from [console.groq.com](https://console.groq.com)
+   - `TAVILY_API_KEY` — Free API key from [tavily.com](https://tavily.com)
+   - `SESSION_KEY` — Any random 32-character secret string
+   - `WEBHOOK_SECRET` — Any random secret string for Telegram webhook validation
+   - `SETUP_KEY` — Any random passphrase for the `/setup` initialization URL
+   - `ADMIN_CODE` — 4-digit numeric passcode to access the `/admin` dashboard (e.g. `4847`)
+4. Cloudflare will automatically provision your Worker, Durable Object, and **Cloudflare D1 Database** in one step!
+5. **One-Time Webhook Setup**:
    Open in your browser:
    ```text
-   https://<your-worker>.workers.dev/setup?key=<SETUP_KEY>
+   https://<your-worker-subdomain>.workers.dev/setup?key=<YOUR_SETUP_KEY>
    ```
-
-5. **Connect your account**
-   Open your login bot in Telegram DM, tap **🔑 Connect Account**, share your phone number, and send the login code **with spaces** (e.g. `1 2 3 4 5`).
+6. **Connect Your Telegram Account**:
+   - Open your Telegram bot in DM.
+   - Tap **🔑 Connect Account**.
+   - Provide your phone number and enter the verification code sent to your Telegram.
+   - Once connected, the userbot locks to your account and runs 24/7!
 
 ---
 
-## 🛠️ Commands
+## 🛠️ Manual Deployment via CLI
 
-| Command | Description |
-| :--- | :--- |
-| `.ai <question>` / `.ask <question>` | Ask AI (also works by replying to a message) |
-| `.s <count> <msg>` / `.fs <count> <msg>` | Spam (750ms delay) or fast spam (max 30, supports mentions & replies) |
-| `.c <count> <text>` | Clone text inline in bold (max 100) |
-| `.id` | Show user & chat info (supports reply) |
-| `.ping` | Check userbot roundtrip latency |
-| `.qt` | Turn replied message into a quote sticker (LyoSU `quote-api`) |
-| `.purge` / `.w` / `.b` | Purge all, wipe bot messages, or burn your own messages |
-| Admin commands | Group/channel admin moderation & management commands |
-| `/admin` *(Bot DM)* | Open hidden Admin Control Panel (passcode via `ADMIN_CODE`) |
+```bash
+# 1. Clone repository
+git clone https://github.com/Pyrexus/tg-ai-userbot.git
+cd tg-ai-userbot
+npm install
+
+# 2. Create Cloudflare D1 Database
+npx wrangler d1 create tg-ai-userbot-db
+# Copy the returned database_id into wrangler.toml under [[d1_databases]]
+
+# 3. Configure secrets
+cp secrets.example.json secrets.json
+# Edit secrets.json with your credentials
+
+# 4. Upload secrets and deploy
+npx wrangler secret bulk secrets.json
+npx wrangler deploy
+
+# 5. Initialize Webhook
+curl "https://<your-worker>.workers.dev/setup?key=<YOUR_SETUP_KEY>"
+```
+
+---
+
+## 📜 License
+
+MIT License. Built for community self-hosting with zero server maintenance.

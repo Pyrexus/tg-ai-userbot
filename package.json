@@ -1,12 +1,14 @@
 {
   "name": "tg-ai-userbot",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "Serverless 24/7 Solo Telegram AI Userbot on Cloudflare Workers, D1 (SQL), and Durable Objects",
   "private": true,
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
     "secrets": "wrangler secret bulk secrets.json",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "build": "tsc --noEmit"
   },
   "dependencies": {
     "@mtcute/html-parser": "latest",

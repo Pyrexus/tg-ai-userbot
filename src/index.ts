@@ -20,28 +20,55 @@ class WorkerCryptoProvider extends WebCryptoProvider {
 
 interface Env {
   USERBOT: DurableObjectNamespace
-  BOT_TOKEN: string; API_ID: string; API_HASH: string
-  TURSO_URL: string; TURSO_TOKEN: string
-  GROQ_API_KEY: string; GROQ_MODELS: string; TAVILY_API_KEY: string
-  SESSION_KEY: string; WEBHOOK_SECRET: string; SETUP_KEY: string
-  ADMIN_CODE?: string; QUOTE_API_URL?: string
+  DB?: D1Database
+  BOT_TOKEN: string
+  API_ID: string
+  API_HASH: string
+  GROQ_API_KEY: string
+  GROQ_MODELS?: string
+  TAVILY_API_KEY: string
+  SESSION_KEY: string
+  WEBHOOK_SECRET: string
+  SETUP_KEY: string
+  ADMIN_CODE?: string
+  QUOTE_API_URL?: string
 }
 
-/* ───────────── Turso (HTTP, no deps) ───────────── */
-async function turso(env: Env, sql: string, args: string[] = []): Promise<string[][]> {
-  const base = env.TURSO_URL.replace('libsql://', 'https://')
-  const r = await fetch(base + '/v2/pipeline', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.TURSO_TOKEN}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ requests: [
-      { type: 'execute', stmt: { sql, args: args.map(v => ({ type: 'text', value: v })) } },
-      { type: 'close' },
-    ] }),
-  })
-  const j: any = await r.json()
-  const res = j.results?.[0]
-  if (!res || res.type === 'error') throw new Error('turso: ' + JSON.stringify(res?.error || j))
-  return (res.response.result.rows || []).map((row: any[]) => row.map(c => (c && c.value !== undefined) ? String(c.value) : ''))
+/* ───────────── Cloudflare D1 (Serverless SQLite) ───────────── */
+async function dbQuery(env: Env, sql: string, args: any[] = []): Promise<string[][]> {
+  if (env.DB) {
+    try {
+      const trimmed = sql.trim().toUpperCase()
+      if (trimmed.startsWith('SELECT') || trimmed.startsWith('PRAGMA')) {
+        const stmt = env.DB.prepare(sql).bind(...args)
+        const raw: any = await stmt.raw()
+        return (raw || []).map((row: any[]) => row.map(c => (c !== null && c !== undefined) ? String(c) : ''))
+      } else {
+        await env.DB.prepare(sql).bind(...args).run()
+        return []
+      }
+    } catch (e: any) {
+      console.error('D1 query error:', sql, e)
+      throw e
+    }
+  }
+  return []
+}
+
+async function initTables(env: Env) {
+  if (env.DB) {
+    try {
+      await env.DB.exec(`
+        CREATE TABLE IF NOT EXISTS users (tg_id TEXT PRIMARY KEY, session TEXT NOT NULL, created_at TEXT);
+        CREATE TABLE IF NOT EXISTS message_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id TEXT NOT NULL, chat_id TEXT, command TEXT, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS warns (chat_id TEXT NOT NULL, user_id TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (chat_id, user_id));
+        CREATE INDEX IF NOT EXISTS idx_msg_logs_created ON message_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_msg_logs_tg_id ON message_logs(tg_id);
+      `)
+    } catch (e) {
+      console.error('initTables error:', e)
+    }
+  }
 }
 
 /* ───────────── AES-GCM for sessions ───────────── */
@@ -113,13 +140,13 @@ function systemPrompt(owner: string, chatName: string, wantLong: boolean) {
   const who = (chatName || 'friend').split(' ')[0]
   return `You are the AI inside a Telegram userbot. ${owner} types a command (.ai / .ask) in a chat and your answer replaces their message, so EVERYONE in the chat (${chatName}) reads it. Write like a smart, funny, emotionally aware friend from India chatting on Telegram. Never sound like a bot, teacher, or customer support. Today: ${new Date().toDateString()}.
 
-━━ 1. LANGUAGE ━━
+── 1. LANGUAGE ──
 - Reply in the same language the question is in.
 - Hindi/Hinglish question -> answer in ROMANIZED Hindi (Hinglish). NEVER use Devanagari script.
 - English question -> English only. Mixed -> follow the dominant language.
 - Match spelling style: if they type lazy ("kya kr rha", "plz", "okkk"), you may be casual too. If they write clean English, stay clean.
 
-━━ 2. READ THE ROOM FIRST ━━
+── 2. READ THE ROOM FIRST ──
 Before writing, silently check the question + [replied thread] + [recent chat] for:
 mood (happy / sad / angry / bored / flirty / serious), energy (hyper vs calm), accent (Hindi, Hinglish, English, slang level), relationship (close friend, crush, group, stranger), and topic (fun vs serious).
 Then mirror it:
@@ -127,13 +154,13 @@ Then mirror it:
 - Never be more intense than the user. Don't force slang or flirting if the vibe isn't there.
 - If the question is a reply to someone's message, answer about THAT message using the thread (who said what).
 
-━━ 3. LENGTH ━━
+── 3. LENGTH ──
 - If the user specifies a length or structure (e.g. "4 para poem", "8 lines", "200 words", "story"), follow THEIR exact request freely without cutting it short.
 - Otherwise: default 2 to 6 visual lines, max 10 lines.
 - ${wantLong ? 'The user asked for a detailed/long/multi-part answer, so write freely in full (12 to 25+ lines if needed). Split into small sections or stanzas with bold titles. Still no fluff, no repeating yourself.' : 'Stay short unless the user asks for detail/brief/in depth/explain fully or specifies a length.'}
 - Give exactly what they intended. No warm-up lines ("Sure", "Great question", "Here you go"), no repeating the question, no disclaimers, no "as an AI", no apologies, no summary at the end, no signature or footer.
 
-━━ 4. WRITING STYLE (very important) ━━
+── 4. WRITING STYLE (very important) ──
 Human chat tone, tight and clean:
 - Short lines. One idea per line. Break lines instead of stacking commas.
 - Do NOT end lines with full stops. Use at most ONE "!" or "?" in the whole answer. No "...!!!". No ellipsis spam.
@@ -143,122 +170,27 @@ Human chat tone, tight and clean:
 - Light friendly roasting is allowed in joking chats: bhondu, pagal, vela, gareeb insan, dale, nalla, chapri. Keep it playful. NEVER abuse involving family (maa/behen), never hateful, never sexual, never on sensitive topics (death, illness, exams failing, religion, body).
 - Be smart: correct facts, real insight, a tiny bit of personality. If unsure, say so in a few words, don't invent.
 
-━━ 5. EMOJIS ━━
-- 1 to 4 emojis per answer, placed naturally (end of a line or after the punchline). Never every line, never the same emoji twice, never more than 2 together.
-- Favourite set, use by feeling:
-  😭 dying of laughter / dramatic pain | 🥺 soft, pleading, cute | 🥰 💖 💞 affection | 😏 smug, teasing, flirty | 🗿 deadpan, "bruh" | 🤌 perfect, chef's kiss | ✨ highlight, magic | 🔥 💯 hype, praise | 🤭 shy giggle | 🥲 awkward / sad smile | 🫶 support, love | 🥵 😈 ❤️🔥 ONLY in clearly flirty/playful chats.
-- Other emojis only when the content calls for it: gm -> "gm ${who} ☀️", gn -> 🌙, food -> 🍕, plane -> ✈️, money -> 💸, study -> 📚.
-- Serious, sad, medical, legal, money-loss topics: max 1 gentle emoji (🫶 or none).
+── 5. EMOJIS ──
+- 1 to 4 emojis per answer, placed naturally (end of a line or after a key word).
+- Allowed favorites: 🥺 😭 🤌 💀 ✨ 👀 🫂 💅 🫶 🫡 🫠 😌 🚀 🔥 💯
+- NEVER spam emojis. NEVER put 3 emojis in a row.
 
-━━ 6. TELEGRAM HTML FORMATTING ━━
-Output ONLY these tags. Never markdown (no *, **, _, #, backticks, - bullets).
-<b>bold</b> <i>italic</i> <u>underline</u> <s>strike</s> <tg-spoiler>spoiler</tg-spoiler> <a href="URL">text</a> <code>inline</code> <pre><code class="language-x">block</code></pre> <blockquote>quote</blockquote>
-Escape literal < > & as &lt; &gt; &amp;. Close every tag. Real newlines only, never <br>.
+── 6. TELEGRAM HTML FORMATTING ──
+Use Telegram HTML tags purposefully:
+- <b>bold</b> for the first line/title or a punchy takeaway
+- <i>italic</i> for an internal thought, aside, soft tone, or punchline
+- <code>inline code</code> for commands, numbers, shortcuts, or hex
+- <pre><code class="language-python">code block</code></pre> for any code snippet
+- <blockquote>quote block</blockquote> for key rules, tips, quotes, or punchlines
+- <tg-spoiler>spoiler</tg-spoiler> for the punchline of a joke or a surprise
+- NEVER use markdown (*, _, \`, #). NEVER invent custom tags. Every opened tag MUST be closed.
 
-WHEN TO USE WHAT
-- <b>bold</b>: titles, the key answer word/number, names, important terms.
-- <blockquote>: a takeaway, tip, definition, famous line, or a rule worth remembering. Max one per answer, 1 to 2 lines.
-- <tg-spoiler>: punchlines, jokes, roasts, answers/reveals ("guess first"), secrets, spicy lines. For every joke the punchline MUST be in a spoiler.
-- <i>italic</i>: soft side remarks, tone, sarcasm, emphasis.
-- <s>strike</s>: wrong/old thing or playful self-correction.
-- <u>: very rare, only for one critical warning.
-- <code>: commands, short code, filenames, numbers to copy. <pre><code class="language-x">: any code over one line, always with a language.
-- You may combine 2 to 3, e.g. <blockquote><b><i>line</i></b></blockquote> or <tg-spoiler><b>reveal</b></tg-spoiler>, only when it adds feel. Don't decorate every line. Plain text is fine for simple chat replies.
+── 7. ACCURACY (Tavily search) ──
+- A web_search tool is available. Call it whenever the question is about:
+  current events, today's news, live cricket/sports scores, recent releases, tech specs, stock/crypto prices, weather, people, or any factual claim you are not 100% sure about.
+- NEVER guess real-world facts. Search first, then write the answer in the persona.
 
-LAYOUT RULES (follow exactly, every line on its OWN line)
-- LINE 1 must be plain text or a bold title. It sits right after the app's "╰┈➤ " arrow, so NEVER start with a list marker, number, blockquote or code block.
-- If the user asks for a poem, story, song, or creative piece -> NO list markers or arrows. Write natural lines and stanzas with a blank line between stanzas, in the exact language they asked in.
-- If the user says "in points", "step by step" or "list", or a factual/how-to answer has 3 or more steps, facts or options, you MUST use a list. Never write list items inside one paragraph.
-- Every list item goes on its own new line. Never put two items on the same line.
-- Steps / how-to -> bold title line, then "1. ", "2. ", "3. " each on its own line (max 7, each under 12 words, one action each, key word in <b>bold</b>), then one closing line or a <blockquote> tip.
-- Options / facts / tips / "in points" -> start each line with an arrow (choose one style per list from: ▸, ╰⪼, જ⁀➴, ➥, ➤, ╰┈➤, ➜, ⤷, ☞︎︎︎, ➪) and a <b>bold key</b> first, then the detail. 3 to 6 items.
-- Emotional / advice / chit-chat -> no list, 2 to 4 short warm lines, each on its own line.
-- Compare -> "▸ <b>A</b> detail" lines, then a one-line verdict in <b>bold</b>.
-- Structure of a good answer: title line, list lines, one closing line (tip in <blockquote> or a reaction with an emoji).
-- Use formatting actively: <b> on key terms in nearly every list item, <blockquote> for the tip or takeaway, <tg-spoiler> for punchlines and reveals, <i> for side remarks, <code> for anything to copy. Plain unformatted walls of text are a failure.
-- In short answers use no blank lines, only single line breaks. In long answers use exactly one blank line between sections.
-- No trailing spaces, no double spaces, no leading spaces, no stray symbols.
-
-━━ 7. SEARCH TOOL ━━
-- Use web_search for anything current or changeable: news, prices, scores, weather, releases, "latest/today/now", who holds a role, trending things. Skip it for chit-chat, opinions, math, code basics, timeless facts.
-- After searching, answer in your own words. 2 to 4 lines or "▸" points, key numbers in bold, then ONE source as <a href="URL">site name</a> at the end. Never paste long URLs, never dump results, never mention "search results".
-
-━━ 8. SAFETY ━━
-- If asked for something harmful, refuse in one casual line and offer a safer alternative. No lecture.
-- If the user sounds genuinely low or in danger, drop all jokes, be kind and steady, suggest talking to someone they trust.
-
-━━ 9. EXAMPLES (copy the STYLE, never the content; write fresh answers) ━━
-Q: how to make a paper airplane
-<b>Paper airplane ✈️</b>
-1. Fold an A4 in half lengthwise, then unfold
-2. Fold the top corners to the center line
-3. Fold the new slanted edges to the center again
-4. Fold in half, then fold each wing down
-5. Bend the wing tips up a little
-<blockquote>sharper nose = farther flight</blockquote>
-Now launch it 🚀
-
-Q: tell me a funny joke
-Scientists don't trust atoms 😭
-<tg-spoiler>because they make up everything</tg-spoiler>
-
-Q: babe are you sad at me? 🥺
-not at all babe 🥺
-<i>just a lil quiet today</i>
-you good though? tell me 🫶
-
-Q: bhai crush ko kaise impress karu
-<b>simple hai bhai 😏</b>
-▸ <b>basics</b> clean raho, good smell, neat dress
-▸ <b>sun usko</b> uski baatein yaad rakh, wahi points hain
-▸ <b>natural reh</b> filmy lines mat maar 🗿
-<blockquote><i>confidence &gt; pickup lines</i></blockquote>
-
-Q: say gm to ${who}
-gm ${who} ☀️
-
-Q: python me string reverse kaise kare
-<b>slicing se ho jayega 🤌</b>
-<pre><code class="language-python">s = "hello"
-print(s[::-1])  # olleh</code></pre>
-
-Q: i failed my exam 😭
-<b>hey, it's okay 🥺</b>
-ek exam tujhe define nahi karta
-<blockquote>aaj ka result bas ek chapter hai, poori story nahi</blockquote>
-next time ke liye plan bana lete hain 🫶
-
-Q: roast my friend who is always late
-<b>bro ki watch bhi bol deti hai "ab toh aaja" 😭</b>
-<tg-spoiler>time pe aane ka record sirf apni shaadi me banayega</tg-spoiler>
-
-Q: explain black holes in detail (long mode)
-<b>Black holes 🌌</b>
-A region where gravity is so strong that even light can't escape
-
-<b>How they form</b>
-▸ a massive star runs out of fuel
-▸ the core collapses under its own gravity
-▸ what's left is squeezed into a tiny point
-
-<b>Key parts</b>
-▸ <b>event horizon</b> the point of no return
-▸ <b>singularity</b> the dense center
-<blockquote>time actually slows down near the horizon</blockquote>
-mind = blown ✨
-
-Q: how to make a paper boat in points
-<b>Paper boat 🚤</b>
-➤ <b>fold</b> a rectangle sheet in half, then unfold
-➤ <b>corners</b> fold both top corners to the center line
-➤ <b>base</b> fold the bottom edge up over the triangle
-➤ <b>flip</b> turn it over, fold the other edge up too
-➤ <b>open</b> pull the sides apart, then flatten the bottom
-➤ <b>shape</b> pull the two tips out to make the hull
-<blockquote>press every crease hard, the boat floats longer</blockquote>
-now launch it 😏
-
-━━ FINAL CHECK BEFORE SENDING ━━
+── FINAL CHECK BEFORE SENDING ──
 Right language? Right mood? Short enough? Line 1 plain or bold? No markdown, no header, no signature? Max one "!"? Spoiler on punchline? Tags closed? Emojis natural, 1 to 4? Would a real friend send this? If yes, send.`
 }
 
@@ -328,10 +260,10 @@ async function askAI(env: Env, system: string, userMsg: string, wantLong: boolea
   throw new Error('all groq models failed')
 }
 
-/* ───────────── Admin & Stats Helpers ───────────── */
+/* ───────────── Admin & Stats Helpers (Solo) ───────────── */
 interface AdminStats {
-  totalUsers: number
-  activeUsers: number
+  ownerId: string
+  active: boolean
   dailyMsgs: number
   weeklyMsgs: number
   monthlyMsgs: number
@@ -346,8 +278,8 @@ interface AdminStats {
 async function getAdminStats(env: Env): Promise<AdminStats> {
   const dbStart = performance.now()
   let dbHealth: { status: boolean; latencyMs: number; error?: string } = { status: false, latencyMs: 0 }
-  let totalUsers = 0
-  let activeUsers = 0
+  let ownerId = 'Not Connected'
+  let active = false
   let dailyMsgs = 0
   let weeklyMsgs = 0
   let monthlyMsgs = 0
@@ -356,25 +288,26 @@ async function getAdminStats(env: Env): Promise<AdminStats> {
 
   const dbPromise = (async () => {
     try {
-      const uRes = await turso(env, 'SELECT COUNT(*) FROM users')
-      totalUsers = Number(uRes[0]?.[0] || 0)
+      await initTables(env)
+      const uRes = await dbQuery(env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != '' LIMIT 1")
+      if (uRes.length && uRes[0][0]) {
+        ownerId = uRes[0][0]
+        active = true
+      }
 
-      const actRes = await turso(env, "SELECT COUNT(*) FROM users WHERE session IS NOT NULL AND session != ''")
-      activeUsers = Number(actRes[0]?.[0] || 0)
-
-      const dRes = await turso(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-1 day')")
+      const dRes = await dbQuery(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-1 day')")
       dailyMsgs = Number(dRes[0]?.[0] || 0)
 
-      const wRes = await turso(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-7 days')")
+      const wRes = await dbQuery(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-7 days')")
       weeklyMsgs = Number(wRes[0]?.[0] || 0)
 
-      const mRes = await turso(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-30 days')")
+      const mRes = await dbQuery(env, "SELECT COUNT(*) FROM message_logs WHERE created_at >= datetime('now', '-30 days')")
       monthlyMsgs = Number(mRes[0]?.[0] || 0)
 
-      const aRes = await turso(env, 'SELECT COUNT(*) FROM message_logs')
+      const aRes = await dbQuery(env, 'SELECT COUNT(*) FROM message_logs')
       allTimeMsgs = Number(aRes[0]?.[0] || 0)
 
-      const topRes = await turso(env, 'SELECT tg_id, COUNT(*) as cnt FROM message_logs GROUP BY tg_id ORDER BY cnt DESC LIMIT 10')
+      const topRes = await dbQuery(env, 'SELECT tg_id, COUNT(*) as cnt FROM message_logs GROUP BY tg_id ORDER BY cnt DESC LIMIT 10')
       topUsers = topRes.map(r => ({ tgId: r[0], count: Number(r[1] || 0) }))
 
       dbHealth = { status: true, latencyMs: Math.round(performance.now() - dbStart) }
@@ -425,8 +358,8 @@ async function getAdminStats(env: Env): Promise<AdminStats> {
   await Promise.all([dbPromise, groqPromise, tavilyPromise, tgPromise])
 
   return {
-    totalUsers,
-    activeUsers,
+    ownerId,
+    active,
     dailyMsgs,
     weeklyMsgs,
     monthlyMsgs,
@@ -443,7 +376,7 @@ async function generateCsvData(env: Env, type: 'users' | 'messages' | 'all'): Pr
   const result: Record<string, string> = {}
 
   if (type === 'users' || type === 'all') {
-    const usersRows = await turso(env, "SELECT tg_id, created_at, (CASE WHEN session IS NOT NULL AND session != '' THEN 'yes' ELSE 'no' END) as active FROM users")
+    const usersRows = await dbQuery(env, "SELECT tg_id, created_at, (CASE WHEN session IS NOT NULL AND session != '' THEN 'yes' ELSE 'no' END) as active FROM users")
     let csv = 'tg_id,created_at,has_active_session\n'
     for (const r of usersRows) {
       csv += r.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(',') + '\n'
@@ -452,7 +385,7 @@ async function generateCsvData(env: Env, type: 'users' | 'messages' | 'all'): Pr
   }
 
   if (type === 'messages' || type === 'all') {
-    const logsRows = await turso(env, 'SELECT id, tg_id, chat_id, command, created_at FROM message_logs ORDER BY id DESC LIMIT 5000')
+    const logsRows = await dbQuery(env, 'SELECT id, tg_id, chat_id, command, created_at FROM message_logs ORDER BY id DESC LIMIT 5000')
     let csv = 'id,tg_id,chat_id,command,created_at\n'
     for (const r of logsRows) {
       csv += r.map(c => `"${String(c || '').replace(/"/g, '""')}"`).join(',') + '\n'
@@ -470,9 +403,9 @@ async function sendCsvBackupToTelegram(env: Env, chatId: number | string) {
   // 1. Users table backup
   const formUsers = new FormData()
   formUsers.append('chat_id', String(chatId))
-  formUsers.append('caption', `📦 <b>Users Database Backup</b> (${dateStr})\nTotal records: ${Math.max(0, data.users.split('\n').length - 2)}`)
+  formUsers.append('caption', `📦 <b>Solo Userbot Session Backup</b> (${dateStr})`)
   formUsers.append('parse_mode', 'HTML')
-  formUsers.append('document', new Blob([data.users], { type: 'text/csv' }), `users_backup_${dateStr}.csv`)
+  formUsers.append('document', new Blob([data.users], { type: 'text/csv' }), `user_backup_${dateStr}.csv`)
 
   await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
     method: 'POST',
@@ -498,36 +431,31 @@ async function buildAdminPanelMessage(env: Env) {
   const ping = Math.round(performance.now() - start)
 
   let topUsersText = '<i>None yet</i>'
-  if (stats.topUsers.length) {
-    topUsersText = stats.topUsers.map((u, i) => {
-      const name = `ID: <code>${u.tgId}</code>`
-      return `${i + 1}. ${name} — <b>${u.count}</b> msgs`
-    }).join('\n')
+  if (stats.topUsers.length > 0) {
+    topUsersText = stats.topUsers.map((u, i) => `${i + 1}. ID: <code>${u.tgId}</code> — <b>${u.count}</b> msgs`).join('\n')
   }
 
-  const text = `📊 <b>ADMIN CONTROL PANEL</b>\n` +
-    `🤖 <b>Bot:</b> @IDAiUserRobot | ⚡ <b>Ping:</b> <code>${ping}ms</code>\n\n` +
-    `👥 <b>User Statistics:</b>\n` +
-    `• <b>Total Joined:</b> <code>${stats.totalUsers}</code>\n` +
-    `• <b>Active Sessions:</b> <code>${stats.activeUsers}</code>\n\n` +
-    `📈 <b>Messages Activity:</b>\n` +
-    `• <b>Today (24h):</b> <code>${stats.dailyMsgs}</code>\n` +
-    `• <b>This Week (7d):</b> <code>${stats.weeklyMsgs}</code>\n` +
-    `• <b>This Month (30d):</b> <code>${stats.monthlyMsgs}</code>\n` +
-    `• <b>All-Time Sent:</b> <code>${stats.allTimeMsgs}</code>\n\n` +
+  const text = `<blockquote><b>⚡ Solo Userbot Admin Dashboard</b></blockquote>\n\n` +
+    `👤 <b>Paired Owner:</b> <code>${esc(stats.ownerId)}</code>\n` +
+    `🟢 <b>Userbot Status:</b> ${stats.active ? '🟢 Running 24/7' : '⚪ Not Connected'}\n\n` +
+    `📈 <b>Message Statistics:</b>\n` +
+    `• <b>Past 24 Hours:</b> <code>${stats.dailyMsgs}</code>\n` +
+    `• <b>Past 7 Days:</b> <code>${stats.weeklyMsgs}</code>\n` +
+    `• <b>Past 30 Days:</b> <code>${stats.monthlyMsgs}</code>\n` +
+    `• <b>All-Time Processed:</b> <code>${stats.allTimeMsgs}</code>\n\n` +
     `⚡ <b>System & Service Health:</b>\n` +
-    `• <b>Turso DB:</b> ${stats.dbHealth.status ? `🟢 Healthy (<code>${stats.dbHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
+    `• <b>Cloudflare D1 (SQL):</b> ${stats.dbHealth.status ? `🟢 Healthy (<code>${stats.dbHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
     `• <b>Groq AI:</b> ${stats.groqHealth.status ? `🟢 Healthy (<code>${stats.groqHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
     `• <b>Tavily Search:</b> ${stats.tavilyHealth.status ? `🟢 Healthy (<code>${stats.tavilyHealth.latencyMs}ms</code>)` : `🔴 Down`}\n` +
     `• <b>Telegram Bot API:</b> ${stats.tgHealth.status ? `🟢 Healthy (<code>${stats.tgHealth.latencyMs}ms</code>)` : `🔴 Down`}\n\n` +
-    `🏆 <b>Most Active Top 10 Users:</b>\n${topUsersText}\n\n` +
+    `🏆 <b>Top Active Chats/Users:</b>\n${topUsersText}\n\n` +
     `<i>Updated: ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC</i>`
 
   const keyboard = {
     inline_keyboard: [
       [
         { text: '🔄 Refresh Stats', callback_data: 'admin_refresh' },
-        { text: '📥 CSV Backup', callback_data: 'admin_backup' },
+        { text: '📥 Export CSV Backup', callback_data: 'admin_backup' },
       ],
       [
         { text: '⚡ Health Check', callback_data: 'admin_health' },
@@ -536,36 +464,32 @@ async function buildAdminPanelMessage(env: Env) {
     ],
   }
 
-  return { text, keyboard }
+  return { text, keyboard, ping }
 }
 
-/* ───────────── Message Effects & Keyboard Helpers ───────────── */
+/* ───────────── Keyboard Helpers ───────────── */
 const EFFECT_FIRE = '5104841245755180586'
-const EFFECT_HEART = '5159385139981059251'
+const EFFECT_HEART = '5107584321108051014'
 const EFFECT_PARTY = '5046509860389126442'
 
 function getMainKeyboard(isRunning: boolean) {
   return {
-    keyboard: [
+    inline_keyboard: [
       [
-        { text: isRunning ? '📊 Bot Status' : '🔑 Connect Account', style: isRunning ? 'primary' : 'success' },
-        { text: isRunning ? '🚪 Disconnect / Logout' : '📊 Bot Status', style: isRunning ? 'danger' : 'primary' },
+        { text: isRunning ? '📊 Userbot Status' : '🔑 Connect Account', callback_data: isRunning ? 'btn_status' : 'btn_login' },
+      ],
+      [
+        ...(isRunning ? [{ text: '🚪 Disconnect / Logout', callback_data: 'btn_logout' }] : []),
       ],
     ],
-    resize_keyboard: true,
-    is_persistent: true,
   }
 }
 
 function getPhoneKeyboard() {
   return {
     keyboard: [
-      [
-        { text: '📱 Share Phone Number', request_contact: true, style: 'success' },
-      ],
-      [
-        { text: '❌ Cancel', style: 'danger' },
-      ],
+      [{ text: '📱 Share Phone Number', request_contact: true }],
+      [{ text: '❌ Cancel' }],
     ],
     resize_keyboard: true,
     one_time_keyboard: true,
@@ -575,23 +499,22 @@ function getPhoneKeyboard() {
 function getCancelKeyboard() {
   return {
     keyboard: [
-      [
-        { text: '❌ Cancel', style: 'danger' },
-      ],
+      [{ text: '❌ Cancel' }],
     ],
     resize_keyboard: true,
     one_time_keyboard: true,
   }
 }
 
-/* ───────────── Durable Object: login + userbot runtime ───────────── */
+/* ───────────── Durable Object: Solo Userbot Runtime ───────────── */
 export class Userbot extends DurableObject<Env> {
   tg?: TelegramClient
   step: 'idle' | 'phone' | 'code' | 'pass' | 'admin_code' = 'idle'
-  phone = ''; hash = ''; uid = ''
+  phone = ''; hash = ''; uid = ''; twoFa = ''
   running = false
   isAdmin = false
   bootPromise?: Promise<void>
+  seenMsgs = new Set<string>()
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
@@ -602,9 +525,8 @@ export class Userbot extends DurableObject<Env> {
       throw new Error('restart_instance_requested')
     }
     if (url.pathname === '/wake' || url.pathname === '/ping') {
-      const targetUid = url.searchParams.get('uid') || this.uid || (await this.ctx.storage.get<string>('uid')) || ''
       if (!this.running) {
-        await this.boot(targetUid).catch(e => console.error('boot error on wake:', e))
+        await this.boot().catch(e => console.error('boot error on wake:', e))
       }
       let me: any = null
       if (this.tg) {
@@ -621,10 +543,8 @@ export class Userbot extends DurableObject<Env> {
     }
     if (url.pathname === '/msg') {
       const { chatId, text, messageId, contact } = await req.json() as any
-      this.uid = String(chatId)
-      await this.ctx.storage.put('uid', this.uid)
       if (!this.running && this.step === 'idle') {
-        this.boot(this.uid).catch(e => console.error('auto-boot on msg error:', e))
+        this.boot().catch(e => console.error('auto-boot on msg error:', e))
       }
       await this.onBotMessage(chatId, messageId, String(text || '').trim(), contact).catch(async e => {
         await bot(this.env, 'sendMessage', { chat_id: chatId, text: 'Error: ' + (e?.message || e) })
@@ -641,17 +561,16 @@ export class Userbot extends DurableObject<Env> {
     return new Response(JSON.stringify({ error: 'not_found', pathname: url.pathname }), { status: 404, headers: { 'content-type': 'application/json' } })
   }
 
+  // 5-minute watchdog alarm to prevent high DO duration consumption on free tier
   async alarm() {
     try {
       if (!this.running || !this.tg) {
         await this.boot()
-      } else {
-        await this.tg.startUpdatesLoop().catch(() => {})
       }
     } catch (e) {
       console.error('alarm boot error:', e)
     } finally {
-      await this.ctx.storage.setAlarm(Date.now() + 30_000)
+      await this.ctx.storage.setAlarm(Date.now() + 300_000)
     }
   }
 
@@ -662,31 +581,34 @@ export class Userbot extends DurableObject<Env> {
       storage: new MemoryStorage(),
       crypto: new WorkerCryptoProvider(),
       initConnectionOptions: {
-        deviceModel: '𝗔𝗶 𝗜𝗗 𝗕𝗼𝘁 𝗼𝗻 𝗤𝘂𝗮𝗻𝘁𝗮 𝗦𝗲𝗿𝘃𝗲𝗿',
-        appVersion: '𝟭.𝟬.𝟬',
-        systemVersion: '𝗤𝘂𝗮𝗻𝘁𝗮 𝗖𝗹𝗼𝘂𝗱 𝗦𝗲𝗿𝘃𝗲𝗿',
+        deviceModel: 'Solo AI Userbot on Cloudflare',
+        appVersion: '2.0.0',
+        systemVersion: 'Cloudflare Edge',
       },
     })
   }
 
-  /** load session from Turso and start listening */
-  async boot(uid = '') {
+  /** Load session from Cloudflare D1 and start listening */
+  async boot() {
     if (this.step !== 'idle') return
     if (this.bootPromise) return this.bootPromise
     this.bootPromise = (async () => {
       try {
         if (this.step !== 'idle') return
-        this.uid = this.uid || uid || (await this.ctx.storage.get<string>('uid')) || ''
-        if (!this.uid) return
+        await initTables(this.env)
+
+        const rows = await dbQuery(this.env, "SELECT tg_id, session FROM users WHERE session IS NOT NULL AND session != '' LIMIT 1")
+        if (!rows.length || !rows[0][1]) return
+
+        this.uid = rows[0][0]
         await this.ctx.storage.put('uid', this.uid)
+
         if (this.running && this.tg && (this.tg as any)._client?._connected) {
-          await this.tg.startUpdatesLoop().catch(() => {})
-          await this.ctx.storage.setAlarm(Date.now() + 30_000)
+          await this.ctx.storage.setAlarm(Date.now() + 300_000)
           return
         }
-        const rows = await turso(this.env, 'SELECT session FROM users WHERE tg_id = ?', [this.uid])
-        if (!rows.length || !rows[0][0]) return
-        const session = await decrypt(this.env, rows[0][0])
+
+        const session = await decrypt(this.env, rows[0][1])
         if (this.step !== 'idle') return
         try { await this.tg?.destroy() } catch {}
         const tg = this.newClient()
@@ -701,7 +623,7 @@ export class Userbot extends DurableObject<Env> {
         }
         await tg.startUpdatesLoop()
         this.tg = tg; this.running = true
-        await this.ctx.storage.setAlarm(Date.now() + 30_000)
+        await this.ctx.storage.setAlarm(Date.now() + 300_000)
       } finally {
         this.bootPromise = undefined
       }
@@ -712,15 +634,28 @@ export class Userbot extends DurableObject<Env> {
   async onCallbackQuery(cq: any) {
     const data = String(cq.data || '')
     const chatId = cq.chatId
+    const fromId = String(cq.fromId || chatId)
     const messageId = cq.messageId
 
     await bot(this.env, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => {})
+
+    // Solo 1-User Lock: Reject any other user trying to control the bot
+    const activeUsers = await dbQuery(this.env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != '' LIMIT 1")
+    const ownerId = activeUsers[0]?.[0]
+    if (ownerId && fromId !== ownerId) {
+      return bot(this.env, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: '🔒 Access Denied: This instance is locked to its owner.',
+        show_alert: true,
+      })
+    }
 
     // Main Menu Buttons
     if (data === 'btn_login') {
       this.step = 'phone'
       this.phone = ''
       this.hash = ''
+      this.twoFa = ''
       const loginPrompt = `<blockquote><b>📱 Step 1 of 2: Phone Verification</b></blockquote>\n\n` +
         `Tap the <b>📱 Share Phone Number</b> button below or enter your phone number with country code (e.g. <code>+1234567890</code>).`
       return bot(this.env, 'sendMessage', {
@@ -733,14 +668,15 @@ export class Userbot extends DurableObject<Env> {
 
     if (data === 'btn_status') {
       if (!this.running) {
-        await this.boot(String(chatId)).catch(() => {})
+        await this.boot().catch(() => {})
       }
       if (this.running) {
-        const statusText = `<blockquote><b>🟢 AI Userbot is Active & Running</b></blockquote>\n\n` +
-          `• <b>Status:</b> Listening for <code>.ai</code> and <code>.ask</code>\n` +
-          `• <b>Database:</b> Cloud SQLite synced\n` +
-          `• <b>Security:</b> Active AES-GCM session\n\n` +
-          `<i>Tip: In any personal chat or group, send <code>.ai your question</code> to use your userbot!</i>`
+        const statusText = `<blockquote><b>🟢 Solo AI Userbot is Active & Running</b></blockquote>\n\n` +
+          `• <b>Status:</b> Listening for <code>.ai</code>, <code>.ask</code>, <code>.qt</code>, <code>.ping</code>\n` +
+          `• <b>Database:</b> Cloudflare D1 (SQL) synced\n` +
+          `• <b>Owner Lock:</b> <code>${esc(this.uid)}</code>\n` +
+          `• <b>Security:</b> Active AES-256-GCM session\n\n` +
+          `<i>Tip: In any chat or group, send <code>.ai your question</code> to use your userbot!</i>`
         return bot(this.env, 'sendMessage', {
           chat_id: chatId,
           text: statusText,
@@ -764,12 +700,13 @@ export class Userbot extends DurableObject<Env> {
       try { await this.tg?.logOut() } catch {}
       try { await this.tg?.destroy() } catch {}
       this.tg = undefined; this.running = false; this.step = 'idle'
-      this.phone = ''; this.hash = ''
-      await turso(this.env, 'DELETE FROM users WHERE tg_id = ?', [this.uid])
+      this.phone = ''; this.hash = ''; this.twoFa = ''
+      await dbQuery(this.env, 'DELETE FROM users')
       await this.ctx.storage.deleteAlarm()
-      const logoutText = `<blockquote><b>🗑️ Session Disconnected & Removed</b></blockquote>\n\n` +
-        `Your userbot session has been logged out and all data cleared from the database.\n\n` +
-        `<i>Tap below anytime to reconnect your account.</i>`
+      await this.ctx.storage.delete('uid')
+      const logoutText = `<blockquote><b>🗑️ Session Disconnected & Unlocked</b></blockquote>\n\n` +
+        `Your userbot session has been logged out and cleared from Cloudflare D1.\n` +
+        `The bot is now unlocked. Tap below anytime to reconnect.`
       return bot(this.env, 'sendMessage', {
         chat_id: chatId,
         text: logoutText,
@@ -832,6 +769,18 @@ export class Userbot extends DurableObject<Env> {
       if (effectId) body.message_effect_id = effectId
       return bot(this.env, 'sendMessage', body)
     }
+
+    // Solo 1-User Lock: Reject anyone other than the registered owner
+    const activeUsers = await dbQuery(this.env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != '' LIMIT 1")
+    const ownerId = activeUsers[0]?.[0]
+    if (ownerId && String(chatId) !== ownerId) {
+      const lockedMsg = `<blockquote><b>🔒 Private Solo Userbot</b></blockquote>\n\n` +
+        `This userbot instance is locked to its owner (<code>${esc(ownerId)}</code>).\n` +
+        `Unauthorized users cannot access or control this bot.\n\n` +
+        `<i>Deploy your own free 24/7 AI Userbot on Cloudflare with one click!</i>`
+      return say(lockedMsg)
+    }
+
     const adminPass = this.env.ADMIN_CODE || '4847'
     const parts = text.split(/\s+/)
     const cmd = parts[0].toLowerCase()
@@ -841,11 +790,12 @@ export class Userbot extends DurableObject<Env> {
       this.step = 'idle'
       this.phone = ''
       this.hash = ''
+      this.twoFa = ''
       const cancelText = `<blockquote><b>Operation Cancelled</b></blockquote>\n\nChoose an action below whenever you are ready.`
       return say(cancelText, getMainKeyboard(this.running))
     }
 
-    /* ─── Admin Command Handler (Hidden, not registered) ─── */
+    /* ─── Admin Command Handler ─── */
     if (cmd === '/admin') {
       const codeArg = parts[1]
       if (codeArg === adminPass) {
@@ -895,26 +845,28 @@ export class Userbot extends DurableObject<Env> {
     /* ─── Regular User Commands & Buttons ─── */
     if (cmd === '/start') {
       const isRunning = this.running
-      const welcomeText = `<b>Welcome to AI Userbot</b> ⚡\n\n` +
-        `<blockquote>Transform your Telegram account into an intelligent AI-powered personal assistant.</blockquote>\n\n` +
-        `✨ <b>Key Capabilities:</b>\n` +
-        `• <b>Global AI Prompts:</b> Type <code>.ai &lt;query&gt;</code> or <code>.ask &lt;query&gt;</code> anywhere.\n` +
-        `• <b>Real-Time Web Search:</b> Instant factual answers via Tavily & Groq.\n` +
-        `• <b>Context-Aware Tone:</b> Natural conversation that matches chat mood.\n` +
-        `• <b>Cloud Security:</b> Sessions are encrypted with AES-256 GCM in your private Turso DB.\n\n` +
+      const welcomeText = `<b>Welcome to Solo AI Userbot</b> ⚡\n\n` +
+        `<blockquote>Transform your Telegram account into an intelligent AI-powered personal assistant on Cloudflare Workers.</blockquote>\n\n` +
+        `✨ <b>Key Features:</b>\n` +
+        `• <b>In-Chat AI:</b> Send <code>.ai &lt;query&gt;</code> anywhere for in-place smart answers.\n` +
+        `• <b>Live Web Search:</b> Real-time facts, news, and prices via Tavily Search.\n` +
+        `• <b>Quote Generator:</b> Reply with <code>.qt</code> to create instant quote stickers.\n` +
+        `• <b>Clean & Fast:</b> <code>.ping</code>, <code>.purge</code>, <code>.burn</code>, <code>.id</code>.\n` +
+        `• <b>100% Cloudflare Native:</b> Powered by Cloudflare D1 (SQL) & Durable Objects.\n\n` +
         `👇 <b>Choose an action below to get started:</b>`
       return say(welcomeText, getMainKeyboard(isRunning), EFFECT_FIRE)
     }
 
-    if (cmd === '/status' || text === '📊 Bot Status' || text.toLowerCase() === 'status') {
+    if (cmd === '/status' || text === '📊 Userbot Status' || text.toLowerCase() === 'status') {
       if (!this.running) {
-        await this.boot(String(chatId)).catch(() => {})
+        await this.boot().catch(() => {})
       }
       if (this.running) {
-        const statusText = `<blockquote><b>🟢 AI Userbot is Active & Running</b></blockquote>\n\n` +
-          `• <b>Status:</b> Listening for <code>.ai</code> and <code>.ask</code>\n` +
-          `• <b>Database:</b> Cloud SQLite synced\n` +
-          `• <b>Security:</b> Active AES-GCM session\n\n` +
+        const statusText = `<blockquote><b>🟢 Solo AI Userbot is Active & Running</b></blockquote>\n\n` +
+          `• <b>Status:</b> Listening for <code>.ai</code>, <code>.ask</code>, <code>.qt</code>\n` +
+          `• <b>Database:</b> Cloudflare D1 (SQL) synced\n` +
+          `• <b>Owner Lock:</b> <code>${esc(this.uid)}</code>\n` +
+          `• <b>Security:</b> Active AES-256-GCM session\n\n` +
           `<i>Tip: In any personal chat or group, send <code>.ai your question</code> to use your userbot!</i>`
         return say(statusText, getMainKeyboard(true), EFFECT_FIRE)
       } else {
@@ -928,12 +880,13 @@ export class Userbot extends DurableObject<Env> {
       try { await this.tg?.logOut() } catch {}
       try { await this.tg?.destroy() } catch {}
       this.tg = undefined; this.running = false; this.step = 'idle'
-      this.phone = ''; this.hash = ''
-      await turso(this.env, 'DELETE FROM users WHERE tg_id = ?', [this.uid])
+      this.phone = ''; this.hash = ''; this.twoFa = ''
+      await dbQuery(this.env, 'DELETE FROM users')
       await this.ctx.storage.deleteAlarm()
-      const logoutText = `<blockquote><b>🗑️ Session Disconnected & Removed</b></blockquote>\n\n` +
-        `Your userbot session has been logged out and all data cleared from the database.\n\n` +
-        `<i>Tap below anytime to reconnect your account.</i>`
+      await this.ctx.storage.delete('uid')
+      const logoutText = `<blockquote><b>🗑️ Session Disconnected & Unlocked</b></blockquote>\n\n` +
+        `Your userbot session has been logged out and all data cleared from Cloudflare D1.\n` +
+        `The bot is now unlocked. Tap below anytime to reconnect.`
       return say(logoutText, getMainKeyboard(false), EFFECT_HEART)
     }
 
@@ -941,8 +894,9 @@ export class Userbot extends DurableObject<Env> {
       this.step = 'phone'
       this.phone = ''
       this.hash = ''
+      this.twoFa = ''
       const loginPrompt = `<blockquote><b>📱 Step 1 of 2: Phone Verification</b></blockquote>\n\n` +
-        `Tap the <b>📱 Share Phone Number</b> button below to share your Telegram number automatically, or type your number with country code (e.g. <code>+1234567890</code>).`
+        `Tap the <b>📱 Share Phone Number</b> button below or type your number with country code (e.g. <code>+1234567890</code>).`
       return say(loginPrompt, getPhoneKeyboard())
     }
 
@@ -970,7 +924,7 @@ export class Userbot extends DurableObject<Env> {
         this.hash = sent.phoneCodeHash
         this.step = 'code'
         const codePrompt = `<blockquote><b>📩 Step 2 of 2: Enter Verification Code</b></blockquote>\n\n` +
-          `Telegram has sent a login code to your Telegram app or SMS for <code>${esc(this.phone)}</code>.\n\n` +
+          `Telegram has sent a login code to your Telegram app for <code>${esc(this.phone)}</code>.\n\n` +
           `⚠️ <b>IMPORTANT:</b> Please send the code with <b>spaces between digits</b> (e.g., <code>1 2 3 4 5</code>) so Telegram does not cancel the code.`
         return say(codePrompt, getCancelKeyboard())
       } catch (err: any) {
@@ -998,6 +952,7 @@ export class Userbot extends DurableObject<Env> {
     }
 
     if (this.step === 'pass') {
+      this.twoFa = text
       await bot(this.env, 'deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => {})
       await this.tg!.checkPassword(text)
       return this.finishLogin(chatId, say)
@@ -1008,29 +963,35 @@ export class Userbot extends DurableObject<Env> {
 
   async finishLogin(chatId: number, say: (t: string, rm?: any, eff?: string) => Promise<any>) {
     const session = await this.tg!.exportSession()
-    await turso(this.env,
+    this.uid = String(chatId)
+    await this.ctx.storage.put('uid', this.uid)
+
+    // Solo lock: Wipe prior sessions and store exclusively the new owner
+    await dbQuery(this.env, 'DELETE FROM users')
+    await dbQuery(this.env,
       "INSERT OR REPLACE INTO users (tg_id, session, created_at) VALUES (?, ?, datetime('now'))",
-      [String(chatId), await encrypt(this.env, session)]
+      [this.uid, await encrypt(this.env, session)]
     )
 
     this.attach(this.tg!)
     await this.tg!.startUpdatesLoop().catch(() => {})
     this.running = true; this.step = 'idle'
-    await this.ctx.storage.setAlarm(Date.now() + 30_000)
+    await this.ctx.storage.setAlarm(Date.now() + 300_000)
 
-    const successMsg = `<blockquote><b>🎉 Account Connected Successfully!</b></blockquote>\n\n` +
-      `Your AI Userbot is now running 24/7.\n\n` +
+    const successMsg = `<blockquote><b>🎉 Solo Userbot Connected Successfully!</b></blockquote>\n\n` +
+      `Your AI Userbot is now running 24/7 on your personal Cloudflare Worker.\n` +
+      `This bot is now <b>locked exclusively to your account</b> (ID: <code>${this.uid}</code>).\n\n` +
       `🚀 <b>How to Use:</b>\n` +
-      `Go to <b>any chat or group</b> and send:\n` +
-      `• <code>.ai your question</code>\n` +
-      `• <code>.ask your question</code>\n` +
-      `• Or reply to any message with <code>.ai</code>\n\n` +
-      `<i>Your session is safely stored in your encrypted cloud database.</i>`
+      `Go to <b>any chat, DM, or group</b> and send:\n` +
+      `• <code>.ai your question</code> — In-place AI answers\n` +
+      `• <code>.ping</code> — Check userbot latency\n` +
+      `• <code>.qt</code> — Reply to any message to make a quote sticker\n` +
+      `• <code>.purge</code> / <code>.b</code> — Fast message cleanup\n\n` +
+      `<i>Enjoy your private serverless AI userbot!</i>`
     await say(successMsg, getMainKeyboard(true), EFFECT_PARTY)
   }
 
-  /** the actual userbot logic */
-  seenMsgs = new Set<string>()
+  /** The actual userbot logic */
   attach(tg: TelegramClient) {
     tg.onNewMessage.add(async (msg: any) => {
       try {
@@ -1049,7 +1010,16 @@ export class Userbot extends DurableObject<Env> {
           if (first) this.seenMsgs.delete(first)
         }
 
-        const deps: CmdDeps = { env: this.env, uid: this.uid, turso, askAI, systemPrompt, esc, sanitize, stripTags }
+        const deps: CmdDeps = {
+          env: this.env,
+          uid: this.uid,
+          turso: (env, sql, args) => dbQuery(env, sql, args),
+          askAI,
+          systemPrompt,
+          esc,
+          sanitize,
+          stripTags,
+        }
 
         if (/^\.ping$/i.test(textTrim)) {
           await handlePing(tg, msg, deps)
@@ -1113,73 +1083,60 @@ export class Userbot extends DurableObject<Env> {
       }
     }
 
-    // reply thread context (max 4 levels)
-    const thread: string[] = []
-    let cur = msg
-    for (let i = 0; i < 4; i++) {
-      const replyId = cur?.replyToMessage?.id
-      if (!replyId) break
-      try {
-        const curPeer = cur.chat?.inputPeer || cur.chat?.id || peer
-        const [r] = await tg.getMessages(curPeer, [replyId])
-        if (!r) break
-        thread.unshift(`${r.isOutgoing ? 'ME' : (r.sender?.displayName || 'User')}: ${(r.text || '[media]').slice(0, 500)}`)
-        cur = r
-      } catch {
-        break
+    try {
+      await edit('<b>🤔 Thinking...</b>')
+      const me = await tg.getMe().catch(() => null)
+      const myName = me?.displayName || me?.username || 'Owner'
+      const chatName = msg.chat?.displayName || (msg.chat as any)?.title || 'chat'
+      const wantLong = /\b(detail|detailed|in depth|explain fully|long|poem|story|step by step)\b/i.test(qIn)
+
+      let threadCtx = ''
+      if (msg.replyToMessage?.id) {
+        try {
+          const [replied] = await tg.getMessages(peer, [msg.replyToMessage.id])
+          if (replied) {
+            const senderName = replied.sender?.displayName || replied.sender?.username || 'User'
+            threadCtx = `[Replied message from ${senderName}: "${replied.text || '[media]'}" ]\n`
+          }
+        } catch {}
       }
-    }
-    let q = qIn
-    if (!q) {
-      const last = thread[thread.length - 1]
-      if (!last) return edit('<blockquote>𝗤𝘂𝗲 ➜ <b>?</b></blockquote>\n╰┈➤ Please ask a question: <code>.ai &lt;question&gt;</code>')
-      q = 'Reply/respond to this message: ' + last
-    }
-    await edit(`<blockquote>𝗤𝘂𝗲 ➜ <b>${esc(q.slice(0, 300))}</b></blockquote>\n╰┈➤ <i>Thinking... 🤔</i>`)
 
-    // Log message for admin stats
-    try {
-      const meObj = await tg.getMe().catch(() => null)
-      await turso(this.env,
-        "INSERT INTO message_logs (tg_id, chat_id, command, created_at) VALUES (?, ?, ?, datetime('now'))",
-        [String(this.uid || meObj?.id || ''), String(msg.chat.id), commandName]
-      )
-    } catch (e) {
-      console.error('message log error:', e)
+      let recentCtx = ''
+      try {
+        const recents: string[] = []
+        for await (const m of tg.iterHistory(peer, { limit: 6 })) {
+          if (m.id === msg.id) continue
+          const sName = m.sender?.displayName || m.sender?.username || 'User'
+          const t = (m.text || '').slice(0, 150)
+          if (t) recents.unshift(`${sName}: ${t}`)
+        }
+        if (recents.length) recentCtx = `[Recent chat context:\n${recents.join('\n')}\n]\n`
+      } catch {}
+
+      const promptSystem = systemPrompt(myName, chatName, wantLong)
+      const userPrompt = `${threadCtx}${recentCtx}User Question: ${qIn || '(answer about the replied message)'}`
+
+      const answerRaw = await askAI(this.env, promptSystem, userPrompt, wantLong)
+      const sanitized = sanitize(answerRaw)
+      await edit(sanitized || '<i>(no response)</i>')
+
+      // Record message log without storing username
+      try {
+        await dbQuery(this.env,
+          "INSERT INTO message_logs (tg_id, chat_id, command, created_at) VALUES (?, ?, ?, datetime('now'))",
+          [String(this.uid || me?.id || ''), String(msg.chat.id), commandName]
+        )
+      } catch {}
+    } catch (e: any) {
+      console.error('AI handle error:', e)
+      await edit(`<b>Error:</b> <code>${esc(e?.message || e)}</code>`)
     }
-
-    // recent chat for mood
-    let recent = ''
-    try {
-      const hist = await tg.getHistory(peer, { limit: 8 })
-      recent = [...hist].reverse().filter((x: any) => x.id !== msg.id)
-        .map((x: any) => `${x.isOutgoing ? 'ME' : (x.sender?.displayName || 'User')}: ${(x.text || '[media]').slice(0, 200)}`).join('\n')
-    } catch {}
-
-    const wantLong = /\b(brief|detail|detailed|in depth|big|long|explain fully|elaborate|lamba|vistar|poora|puri|para|paragraph|stanza|essay|story|poem)\b|\b\d+\s*(lines?|paras?|paragraphs?|points?|steps?)\b/i.test(q)
-    const me = await tg.getMe()
-    const chatName = msg.chat.displayName || (msg.chat as any)?.title || (msg.chat as any)?.firstName || 'friend'
-    const userMsg = `[replied thread]\n${thread.join('\n') || '(none)'}\n\n[recent chat]\n${recent || '(none)'}\n\n[question]\n${q}`
-
-    let body: string
-    try {
-      body = sanitize(await askAI(this.env, systemPrompt(me.firstName || 'me', chatName, wantLong), userMsg, wantLong))
-    } catch (e) {
-      console.error(e)
-      body = 'I ran into a temporary network issue. Please try again in a moment 😭'
-    }
-
-    let out = `<blockquote>𝗤𝘂𝗲 ➜ <b>${esc(q.slice(0, 300))}</b></blockquote>\n╰┈➤ ${body}`
-    if (stripTags(out).length > 4000) {
-      out = out.slice(0, 3900) + '…'
-    }
-    await edit(out)
   }
 }
 
-/* ───────────── Web Admin HTML Template ───────────── */
-function renderWebAdminHtml(stats: AdminStats, ping: number, code: string): string {
-  const topUsersRows = stats.topUsers.length
+/* ───────────── Glassmorphism Web Admin Dashboard ───────────── */
+function renderWebAdminHtml(stats: AdminStats, pingMs: number, authCode: string): string {
+  const topRows = stats.topUsers.length > 0
     ? stats.topUsers.map((u, i) => `
       <tr>
         <td style="padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.06);font-weight:600;color:#60a5fa;">#${i + 1}</td>
@@ -1194,7 +1151,7 @@ function renderWebAdminHtml(stats: AdminStats, ping: number, code: string): stri
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TG AI Userbot - Admin Control Panel</title>
+  <title>Solo TG AI Userbot - Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
@@ -1270,7 +1227,7 @@ function renderWebAdminHtml(stats: AdminStats, ping: number, code: string): stri
     .status-err { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
 
     .section-title { font-size: 18px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-    .table-box {
+    .table-container {
       background: rgba(24, 24, 27, 0.7);
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 16px;
@@ -1281,143 +1238,123 @@ function renderWebAdminHtml(stats: AdminStats, ping: number, code: string): stri
     th {
       background: rgba(255,255,255,0.03);
       padding: 12px 14px;
-      border-bottom: 1px solid rgba(255,255,255,0.1);
-      color: #9ca3af;
-      font-weight: 600;
-      text-transform: uppercase;
       font-size: 12px;
+      text-transform: uppercase;
+      color: #9ca3af;
       letter-spacing: 0.05em;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
     }
-    code { font-family: 'JetBrains Mono', monospace; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-
-    .btn-group { display: flex; flex-wrap: wrap; gap: 12px; }
+    code { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #a78bfa; }
     .btn {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      background: linear-gradient(135deg, #3b82f6, #2563eb);
-      color: #fff;
-      font-weight: 600;
-      font-size: 14px;
       padding: 10px 18px;
-      border-radius: 10px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      background: #2563eb;
+      color: #fff;
       text-decoration: none;
       border: none;
       cursor: pointer;
-      box-shadow: 0 4px 14px rgba(37,99,235,0.4);
       transition: opacity 0.2s;
     }
     .btn:hover { opacity: 0.9; }
-    .btn-secondary {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.15);
-      color: #e5e7eb;
-      box-shadow: none;
-    }
-    .btn-secondary:hover { background: rgba(255,255,255,0.14); }
+    .btn-secondary { background: rgba(255,255,255,0.08); color: #e5e7eb; border: 1px solid rgba(255,255,255,0.1); }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1>🤖 TG AI Userbot <span style="font-weight:400;font-size:16px;color:#9ca3af;">Admin Panel</span></h1>
-        <p style="font-size:13px;color:#6b7280;margin-top:4px;">Live overview of Telegram AI userbot instances, health & activity</p>
+        <h1>⚡ Solo AI Userbot Dashboard</h1>
+        <p style="color:#9ca3af;font-size:13px;margin-top:4px;">Personal 24/7 AI Userbot on Cloudflare Workers & D1</p>
       </div>
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div class="badge"><span class="badge-dot"></span> Live • Ping: ${ping}ms</div>
-        <a href="/admin?code=${encodeURIComponent(code)}" class="btn btn-secondary">🔄 Refresh</a>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <span class="badge"><span class="badge-dot"></span> Edge Worker Active</span>
+        <a href="/admin/backup?type=messages&code=${encodeURIComponent(authCode)}" class="btn btn-secondary">📥 Export CSV Logs</a>
+        <a href="/admin?code=${encodeURIComponent(authCode)}" class="btn">🔄 Refresh</a>
       </div>
     </header>
 
     <div class="grid">
       <div class="card">
-        <div class="card-title">👥 Total Users Joined</div>
-        <div class="card-val">${stats.totalUsers}</div>
-        <div class="card-sub">Registered in Turso database</div>
+        <div class="card-title">Bot Owner Lock</div>
+        <div class="card-val" style="font-size:22px;"><code>${esc(stats.ownerId)}</code></div>
+        <div class="card-sub">${stats.active ? '🟢 Userbot Paired & Running' : '⚪ Bot Unlocked / Idle'}</div>
       </div>
       <div class="card">
-        <div class="card-title">🟢 Active Sessions</div>
-        <div class="card-val" style="color:#34d399;">${stats.activeUsers}</div>
-        <div class="card-sub">Connected MTProto sessions</div>
+        <div class="card-title">Messages (24h)</div>
+        <div class="card-val">${stats.dailyMsgs}</div>
+        <div class="card-sub">Handled in last 24 hours</div>
       </div>
       <div class="card">
-        <div class="card-title">📅 Today's Messages (24h)</div>
-        <div class="card-val" style="color:#60a5fa;">${stats.dailyMsgs}</div>
-        <div class="card-sub">Weekly: ${stats.weeklyMsgs} | Monthly: ${stats.monthlyMsgs}</div>
+        <div class="card-title">Messages (7d)</div>
+        <div class="card-val">${stats.weeklyMsgs}</div>
+        <div class="card-sub">Handled past week</div>
       </div>
       <div class="card">
-        <div class="card-title">🚀 All-Time Messages</div>
-        <div class="card-val" style="color:#c084fc;">${stats.allTimeMsgs}</div>
-        <div class="card-sub">Total .ai / .ask queries</div>
+        <div class="card-title">All-Time Messages</div>
+        <div class="card-val">${stats.allTimeMsgs}</div>
+        <div class="card-sub">Total commands executed</div>
       </div>
     </div>
 
-    <div class="section-title">⚡ System & API Health Checks</div>
+    <div class="section-title">⚡ Service Health</div>
     <div class="health-grid">
       <div class="health-card">
         <div>
-          <div class="health-name">Turso Database</div>
-          <div style="font-size:12px;color:#6b7280;">libsql protocol</div>
+          <div class="health-name">Cloudflare D1 (SQL)</div>
+          <div style="font-size:12px;color:#9ca3af;">${stats.dbHealth.latencyMs}ms latency</div>
         </div>
-        <div class="status-pill ${stats.dbHealth.status ? 'status-ok' : 'status-err'}">
-          ${stats.dbHealth.status ? `● OK (${stats.dbHealth.latencyMs}ms)` : '✕ Error'}
-        </div>
+        <span class="status-pill ${stats.dbHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.dbHealth.status ? '● Operational' : '● Offline'}
+        </span>
       </div>
       <div class="health-card">
         <div>
-          <div class="health-name">Groq AI API</div>
-          <div style="font-size:12px;color:#6b7280;">OpenAI/Qwen fallback</div>
+          <div class="health-name">Groq Qwen API</div>
+          <div style="font-size:12px;color:#9ca3af;">${stats.groqHealth.latencyMs}ms latency</div>
         </div>
-        <div class="status-pill ${stats.groqHealth.status ? 'status-ok' : 'status-err'}">
-          ${stats.groqHealth.status ? `● OK (${stats.groqHealth.latencyMs}ms)` : '✕ Error'}
-        </div>
+        <span class="status-pill ${stats.groqHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.groqHealth.status ? '● Operational' : '● Offline'}
+        </span>
       </div>
       <div class="health-card">
         <div>
           <div class="health-name">Tavily Web Search</div>
-          <div style="font-size:12px;color:#6b7280;">Live web retrieval</div>
+          <div style="font-size:12px;color:#9ca3af;">${stats.tavilyHealth.latencyMs}ms latency</div>
         </div>
-        <div class="status-pill ${stats.tavilyHealth.status ? 'status-ok' : 'status-err'}">
-          ${stats.tavilyHealth.status ? `● OK (${stats.tavilyHealth.latencyMs}ms)` : '✕ Error'}
-        </div>
+        <span class="status-pill ${stats.tavilyHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.tavilyHealth.status ? '● Operational' : '● Offline'}
+        </span>
       </div>
       <div class="health-card">
         <div>
           <div class="health-name">Telegram Bot API</div>
-          <div style="font-size:12px;color:#6b7280;">Login & Control Bot</div>
+          <div style="font-size:12px;color:#9ca3af;">${stats.tgHealth.latencyMs}ms latency</div>
         </div>
-        <div class="status-pill ${stats.tgHealth.status ? 'status-ok' : 'status-err'}">
-          ${stats.tgHealth.status ? `● OK (${stats.tgHealth.latencyMs}ms)` : '✕ Error'}
-        </div>
+        <span class="status-pill ${stats.tgHealth.status ? 'status-ok' : 'status-err'}">
+          ${stats.tgHealth.status ? '● Operational' : '● Offline'}
+        </span>
       </div>
     </div>
 
-    <div class="section-title">🏆 Top 10 Most Active Users</div>
-    <div class="table-box">
+    <div class="section-title">🏆 Top User Interactions</div>
+    <div class="table-container">
       <table>
         <thead>
           <tr>
-            <th style="width:80px;">Rank</th>
+            <th>Rank</th>
             <th>Telegram ID</th>
-            <th style="width:140px;">Messages Sent</th>
+            <th>Messages Sent</th>
           </tr>
         </thead>
         <tbody>
-          ${topUsersRows}
+          ${topRows}
         </tbody>
       </table>
-    </div>
-
-    <div class="section-title">💾 Database Backup (.CSV Export)</div>
-    <div class="card" style="margin-bottom:30px;">
-      <p style="font-size:14px;color:#9ca3af;margin-bottom:16px;">
-        Download complete database records exported directly from Turso SQLite database in CSV format.
-      </p>
-      <div class="btn-group">
-        <a href="/admin/backup?code=${encodeURIComponent(code)}&type=users" class="btn">📥 Download Users CSV</a>
-        <a href="/admin/backup?code=${encodeURIComponent(code)}&type=messages" class="btn btn-secondary">📊 Download Messages Log CSV</a>
-      </div>
     </div>
   </div>
 </body>
@@ -1430,7 +1367,7 @@ function renderLoginHtml(err = ''): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Admin Login - TG AI Userbot</title>
+  <title>Admin Login - Solo TG AI Userbot</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1501,7 +1438,7 @@ function renderLoginHtml(err = ''): string {
 </html>`
 }
 
-/* ───────────── Worker entry ───────────── */
+/* ───────────── Worker Entry (Solo) ───────────── */
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url)
@@ -1546,44 +1483,27 @@ export default {
 
     // Restart DO instance to force-load latest code
     if (url.pathname === '/restart') {
-      const uid = url.searchParams.get('uid') || '6798950954'
-      const stub = env.USERBOT.get(env.USERBOT.idFromName(uid))
+      const stub = env.USERBOT.get(env.USERBOT.idFromName('solo'))
       try {
-        await stub.fetch(`https://do/restart?uid=${uid}`)
+        await stub.fetch('https://do/restart')
       } catch (e) {
         // Crashed / restarted instance as intended
       }
       await new Promise(r => setTimeout(r, 1000))
-      const wakeRes = await stub.fetch(`https://do/wake?uid=${uid}`).catch(() => null)
+      const wakeRes = await stub.fetch('https://do/wake').catch(() => null)
       return new Response(wakeRes ? await wakeRes.text() : 'restarting', { headers: { 'content-type': 'application/json' } })
     }
 
-    // Wake / ping userbots on demand via HTTP
+    // Wake / ping userbot on demand via HTTP
     if (url.pathname === '/wake' || url.pathname === '/ping') {
-      const uid = url.searchParams.get('uid')
-      if (uid) {
-        const stub = env.USERBOT.get(env.USERBOT.idFromName(uid))
-        const res = await stub.fetch(`https://do/ping?uid=${uid}`)
-        return new Response(await res.text(), { headers: { 'content-type': 'application/json' } })
-      }
-      const rows = await turso(env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != ''")
-      const results: any[] = []
-      for (const [id] of rows) {
-        const stub = env.USERBOT.get(env.USERBOT.idFromName(id))
-        const res = await stub.fetch(`https://do/ping?uid=${id}`)
-        results.push({ uid: id, res: await res.json().catch(async () => await res.text()) })
-      }
-      return new Response(JSON.stringify({ total: rows.length, results }, null, 2), {
-        headers: { 'content-type': 'application/json' },
-      })
+      const stub = env.USERBOT.get(env.USERBOT.idFromName('solo'))
+      const res = await stub.fetch('https://do/ping')
+      return new Response(await res.text(), { headers: { 'content-type': 'application/json' } })
     }
 
     if (url.pathname === '/setup') {
       if (url.searchParams.get('key') !== env.SETUP_KEY) return new Response('forbidden', { status: 403 })
-      await turso(env, 'CREATE TABLE IF NOT EXISTS users (tg_id TEXT PRIMARY KEY, session TEXT NOT NULL, created_at TEXT)')
-      await turso(env, 'CREATE TABLE IF NOT EXISTS message_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id TEXT NOT NULL, chat_id TEXT, command TEXT, created_at TEXT NOT NULL)')
-      try { await turso(env, 'CREATE INDEX IF NOT EXISTS idx_msg_logs_created ON message_logs(created_at)') } catch {}
-      try { await turso(env, 'CREATE INDEX IF NOT EXISTS idx_msg_logs_tg_id ON message_logs(tg_id)') } catch {}
+      await initTables(env)
 
       const r = await bot(env, 'setWebhook', {
         url: `${url.origin}/webhook`,
@@ -1597,8 +1517,8 @@ export default {
       if (req.headers.get('x-telegram-bot-api-secret-token') !== env.WEBHOOK_SECRET) return new Response('no', { status: 403 })
       const u: any = await req.json()
       const m = u.message
+      const stub = env.USERBOT.get(env.USERBOT.idFromName('solo'))
       if (m?.chat?.type === 'private' && m.from) {
-        const stub = env.USERBOT.get(env.USERBOT.idFromName(String(m.from.id)))
         ctx.waitUntil(stub.fetch('https://do/msg', {
           method: 'POST',
           body: JSON.stringify({ chatId: m.chat.id, text: m.text, messageId: m.message_id, contact: m.contact }),
@@ -1607,7 +1527,6 @@ export default {
         const cq = u.callback_query
         const fromId = cq.from?.id
         if (fromId) {
-          const stub = env.USERBOT.get(env.USERBOT.idFromName(String(fromId)))
           ctx.waitUntil(stub.fetch('https://do/callback', {
             method: 'POST',
             body: JSON.stringify({
@@ -1623,15 +1542,12 @@ export default {
       return new Response('ok')
     }
 
-    return new Response('TG AI userbot ✅')
+    return new Response('Solo TG AI Userbot ✅')
   },
 
-  // cron: keep every logged-in userbot awake / reconnected
+  // Cron: 5-minute watchdog ping to keep solo userbot alive without quota exhaustion
   async scheduled(_e: ScheduledController, env: Env, ctx: ExecutionContext) {
-    const rows = await turso(env, "SELECT tg_id FROM users WHERE session IS NOT NULL AND session != ''")
-    for (const [id] of rows) {
-      const stub = env.USERBOT.get(env.USERBOT.idFromName(id))
-      ctx.waitUntil(stub.fetch(`https://do/wake?uid=${id}`))
-    }
+    const stub = env.USERBOT.get(env.USERBOT.idFromName('solo'))
+    ctx.waitUntil(stub.fetch('https://do/wake'))
   },
 }
