@@ -477,12 +477,53 @@ function getMainKeyboard(isRunning: boolean) {
     inline_keyboard: [
       [
         { text: isRunning ? '📊 Userbot Status' : '🔑 Connect Account', callback_data: isRunning ? 'btn_status' : 'btn_login' },
+        { text: '📖 Features & Help', callback_data: 'btn_help' },
       ],
       [
         ...(isRunning ? [{ text: '🚪 Disconnect / Logout', callback_data: 'btn_logout' }] : []),
       ],
     ],
   }
+}
+
+function getHelpGuideText(): string {
+  return `<blockquote><b>📖 AI Userbot — Master Command Guide</b></blockquote>\n\n` +
+    `🤖 <b>In-Chat AI Assistant</b>\n` +
+    `• <code>.ai &lt;question&gt;</code> or <code>.ask &lt;question&gt;</code>\n` +
+    `  ↳ <b>Purpose:</b> Generates smart, human-like answers formatted in beautiful Telegram HTML.\n` +
+    `  ↳ <b>How to Use:</b> Type in any DM or group. The message edits itself with the answer.\n` +
+    `• <b>Reply + <code>.ai</code></b>\n` +
+    `  ↳ <b>Purpose:</b> Analyzes the replied message or conversation thread.\n` +
+    `• <b>Real-Time Web Search</b>\n` +
+    `  ↳ <b>Purpose:</b> Automatically triggered via Tavily for live facts, cricket, news, & weather.\n\n` +
+    `🧹 <b>Chat Cleanup & Privacy</b>\n` +
+    `• <code>.purge</code> / <code>.p</code> <i>(reply to a message)</i>\n` +
+    `  ↳ <b>Purpose:</b> Mass-deletes all messages forward from the replied message for both sides.\n` +
+    `  ↳ <b>Note:</b> Works in DMs and groups (requires delete permission in groups).\n` +
+    `• <code>.burn</code> / <code>.b</code>\n` +
+    `  ↳ <b>Purpose:</b> Self-purge: deletes only your own messages with verified delete count.\n` +
+    `• <code>.wipe</code> / <code>.w</code>\n` +
+    `  ↳ <b>Purpose:</b> Cleans up all bot messages in the current chat.\n\n` +
+    `⚡ <b>Productivity & Fun Tools</b>\n` +
+    `• <code>.ping</code>\n` +
+    `  ↳ <b>Purpose:</b> Checks bot roundtrip latency with your username/ID.\n` +
+    `• <code>.id</code> <i>(or reply to user)</i>\n` +
+    `  ↳ <b>Purpose:</b> Displays detailed User ID, chat ID, and join date metadata.\n` +
+    `• <code>.qt</code> <i>(reply to message)</i>\n` +
+    `  ↳ <b>Purpose:</b> Generates a custom quote sticker from the replied message.\n` +
+    `• <code>.s &lt;count&gt; &lt;text&gt;</code>\n` +
+    `  ↳ <b>Purpose:</b> Spams messages with a 750ms delay (max 30, supports user tags).\n` +
+    `• <code>.fs &lt;count&gt; &lt;text&gt;</code>\n` +
+    `  ↳ <b>Purpose:</b> Fast burst spam: sends all messages at once without delay (max 30).\n` +
+    `• <code>.c &lt;count&gt; &lt;text&gt;</code>\n` +
+    `  ↳ <b>Purpose:</b> Clones/repeats text inline in bold (max 100).\n\n` +
+    `🛡️ <b>Admin Moderation (Group Admins Only)</b>\n` +
+    `• <code>.ban</code> <i>(reply)</i> — Bans user with a brutal AI roast.\n` +
+    `• <code>.kick</code> <i>(reply)</i> — Removes user from group without banning.\n` +
+    `• <code>.mute 10m/1h/1d</code> <i>(reply)</i> — Mutes user for the specified duration.\n` +
+    `• <code>.warn &lt;reason&gt;</code> <i>(reply)</i> — Warns user (auto-bans on 3/3 warnings).\n` +
+    `• <code>.promote</code> / <code>.demote</code> <i>(reply)</i> — Grants/revokes admin rights.\n\n` +
+    `<blockquote><i>💡 Tip: All commands run directly from your user account. No extra bot prefix or invite needed!</i></blockquote>`
 }
 
 function getPhoneKeyboard() {
@@ -647,6 +688,15 @@ export class Userbot extends DurableObject<Env> {
         callback_query_id: cq.id,
         text: '🔒 Access Denied: This instance is locked to its owner.',
         show_alert: true,
+      })
+    }
+
+    if (data === 'btn_help') {
+      return bot(this.env, 'sendMessage', {
+        chat_id: chatId,
+        text: getHelpGuideText(),
+        parse_mode: 'HTML',
+        reply_markup: getMainKeyboard(this.running),
       })
     }
 
@@ -845,16 +895,24 @@ export class Userbot extends DurableObject<Env> {
     /* ─── Regular User Commands & Buttons ─── */
     if (cmd === '/start') {
       const isRunning = this.running
-      const welcomeText = `<b>Welcome to Solo AI Userbot</b> ⚡\n\n` +
-        `<blockquote>Transform your Telegram account into an intelligent AI-powered personal assistant on Cloudflare Workers.</blockquote>\n\n` +
-        `✨ <b>Key Features:</b>\n` +
-        `• <b>In-Chat AI:</b> Send <code>.ai &lt;query&gt;</code> anywhere for in-place smart answers.\n` +
-        `• <b>Live Web Search:</b> Real-time facts, news, and prices via Tavily Search.\n` +
-        `• <b>Quote Generator:</b> Reply with <code>.qt</code> to create instant quote stickers.\n` +
-        `• <b>Clean & Fast:</b> <code>.ping</code>, <code>.purge</code>, <code>.burn</code>, <code>.id</code>.\n` +
-        `• <b>100% Cloudflare Native:</b> Powered by Cloudflare D1 (SQL) & Durable Objects.\n\n` +
-        `👇 <b>Choose an action below to get started:</b>`
+      const welcomeText = `<blockquote><b>⚡ Welcome to Solo AI Userbot</b></blockquote>\n\n` +
+        `<b>Your personal Telegram account, supercharged with cutting-edge AI on Cloudflare Workers & D1 (SQL).</b>\n\n` +
+        `🔒 <b>100% Private & Data Safe:</b>\n` +
+        `• All credentials and sessions are encrypted with AES-256-GCM in Cloudflare D1.\n` +
+        `• Runs directly on your personal Cloudflare account with zero external databases or loggers.\n` +
+        `• Ultra-fast sub-second edge execution across 300+ cities globally.\n\n` +
+        `✨ <b>What You Can Do:</b>\n` +
+        `• <b>Smart AI Responses:</b> Send <code>.ai &lt;question&gt;</code> anywhere to edit-in intelligent answers.\n` +
+        `• <b>Live Web Search:</b> Instant real-time facts via Tavily search.\n` +
+        `• <b>Quote Stickers:</b> Reply with <code>.qt</code> to cook instant quote stickers.\n` +
+        `• <b>Chat Cleanup:</b> Fast <code>.purge</code>, <code>.burn</code>, and <code>.wipe</code> tools.\n` +
+        `• <b>Group Admin Suite:</b> Moderation commands with permission verification.\n\n` +
+        `👇 <i>Tap below to check status, view all commands, or connect your account:</i>`
       return say(welcomeText, getMainKeyboard(isRunning), EFFECT_FIRE)
+    }
+
+    if (cmd === '/help' || text === '📖 Features & Help' || text.toLowerCase() === 'help') {
+      return say(getHelpGuideText(), getMainKeyboard(this.running))
     }
 
     if (cmd === '/status' || text === '📊 Userbot Status' || text.toLowerCase() === 'status') {
